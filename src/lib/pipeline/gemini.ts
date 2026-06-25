@@ -55,7 +55,7 @@ export async function translateImageWithGemini(
 
   try {
     const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: 'gemini-3.5-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-3.1-flash-lite' });
     const base64Image = imageBuffer.toString('base64');
 
     const prompt = `Analyze this manga/manhwa page. Detect all speech bubbles, narrator boxes, and text blocks.
@@ -69,7 +69,7 @@ Guidelines:
 
     let response: any;
     let retries = 3;
-    let delay = 2000;
+    let delay = 500; // 500ms initial wait to stay within Vercel's strict 10s timeout
 
     while (retries > 0) {
       try {
