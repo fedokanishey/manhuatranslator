@@ -74,9 +74,116 @@ export function useTranslation(): UseTranslationReturn {
         throw new Error(data.error || 'Translation failed');
       }
 
-      setProgress(100);
-      setStatusMessage('Translation complete!');
-      setResult(data);
+      if (data.pages && data.pages.length > 0) {
+        // Already fully translated (e.g., from cache)
+        setProgress(100);
+        setStatusMessage('Translation complete! (Cached)');
+        setResult(data);
+        return;
+      }
+
+      if (data.images && data.images.length > 0) {
+        const imagesList = data.images;
+        // Multi-step incremental page loading
+        const initialPages = imagesList.map((img: any) => ({
+          pageIndex: img.index,
+          imageUrl: img.src,
+          imageBase64: '', // Empty initially
+          width: img.width || 800,
+          height: img.height || 1200,
+          overlays: [],
+          loading: true,
+        }));
+
+        setResult({
+          ...data,
+          pages: initialPages,
+        });
+
+        setProgress(15);
+        setStatusMessage(`Starting page translation (0/${imagesList.length})...`);
+
+        const CONCURRENCY = 3;
+        const imagesToTranslate = [...imagesList];
+        let completedCount = 0;
+
+        const translatePageWorker = async (img: any) => {
+          try {
+            const pageRes = await fetch('/api/translate/page', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                imageUrl: img.src,
+                index: img.index,
+                targetLang,
+                langs: data.langs,
+              }),
+            });
+
+            if (!pageRes.ok) {
+              throw new Error(`HTTP ${pageRes.status}`);
+            }
+
+            const pageData = await pageRes.json();
+            if (!pageData.success || !pageData.page) {
+              throw new Error(pageData.error || 'Failed to translate page');
+            }
+
+            const translatedPage = pageData.page;
+
+            setResult((prevResult) => {
+              if (!prevResult || !prevResult.pages) return prevResult;
+              const updatedPages = [...prevResult.pages];
+              updatedPages[img.index] = {
+                ...translatedPage,
+                loading: false,
+              };
+              return {
+                ...prevResult,
+                pages: updatedPages,
+              };
+            });
+          } catch (pageErr) {
+            console.error(`Failed to translate page ${img.index}:`, pageErr);
+            setResult((prevResult) => {
+              if (!prevResult || !prevResult.pages) return prevResult;
+              const updatedPages = [...prevResult.pages];
+              updatedPages[img.index] = {
+                ...updatedPages[img.index],
+                loading: false,
+                error: pageErr instanceof Error ? pageErr.message : 'Translation failed',
+              } as any;
+              return {
+                ...prevResult,
+                pages: updatedPages,
+              };
+            });
+          } finally {
+            completedCount++;
+            const currentProgress = 15 + Math.round((completedCount / imagesList.length) * 80);
+            setProgress(Math.min(currentProgress, 95));
+            setStatusMessage(`Translated ${completedCount}/${imagesList.length} pages...`);
+          }
+        };
+
+        const workers = Array.from({ length: Math.min(CONCURRENCY, imagesToTranslate.length) }).map(async () => {
+          while (imagesToTranslate.length > 0) {
+            const nextImg = imagesToTranslate.shift();
+            if (nextImg) {
+              await translatePageWorker(nextImg);
+            }
+          }
+        });
+
+        await Promise.all(workers);
+        setProgress(100);
+        setStatusMessage('Translation complete!');
+      } else {
+        // Text-only or fallback
+        setProgress(100);
+        setStatusMessage('Translation complete!');
+        setResult(data);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'An unexpected error occurred';
       setError(message);

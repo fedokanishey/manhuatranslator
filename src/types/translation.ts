@@ -34,12 +34,22 @@ export interface TranslatedPage {
   width: number;
   height: number;
   overlays: TextOverlay[];
+  loading?: boolean;
+  error?: string;
 }
 
 export interface TranslatedTextBlock {
   original: string;
   translated: string;
   selector: string;
+}
+
+export interface ParsedImage {
+  src: string;
+  alt: string;
+  index: number;
+  width?: number;
+  height?: number;
 }
 
 export interface TranslationResult {
@@ -50,6 +60,8 @@ export interface TranslationResult {
   translatedHtml?: string;
   textBlocks?: TranslatedTextBlock[];
   pages?: TranslatedPage[];
+  images?: ParsedImage[];
+  langs?: string[];
   cached: boolean;
   processedAt: string;
   processingTimeMs: number;

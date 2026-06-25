@@ -4,9 +4,12 @@ import { runTranslationPipeline } from '@/lib/pipeline/orchestrator';
 import { checkRateLimit } from '@/lib/security';
 import { RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_MS } from '@/lib/constants';
 
+export const maxDuration = 60; // Max execution timeout for Vercel Hobby
+
 const requestSchema = z.object({
   url: z.string().url('Please provide a valid URL'),
   targetLang: z.string().min(2).max(5).optional().default('ar'),
+  full: z.boolean().optional().default(false),
 });
 
 export async function POST(request: NextRequest) {
@@ -47,10 +50,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { url, targetLang } = parseResult.data;
+    const { url, targetLang, full } = parseResult.data;
 
     // Run translation pipeline
-    const result = await runTranslationPipeline(url, targetLang);
+    const result = await runTranslationPipeline(url, targetLang, full);
 
     return NextResponse.json(result, {
       status: result.success ? 200 : 422,

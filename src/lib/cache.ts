@@ -3,7 +3,9 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { CACHE_TTL_MS } from './constants';
 
-const CACHE_DIR = path.join(process.cwd(), '.cache', 'translations');
+const CACHE_DIR = process.env.VERCEL
+  ? path.join('/tmp', 'translations')
+  : path.join(process.cwd(), '.cache', 'translations');
 
 function ensureCacheDir(): void {
   if (!fs.existsSync(CACHE_DIR)) {

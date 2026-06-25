@@ -1,6 +1,6 @@
 import { fetchPage } from './fetcher';
 import { parseHtml } from './parser';
-import { processImages } from './image-processor';
+import { processImage, processImages } from './image-processor';
 import { runOCR } from './ocr';
 import { translateImageWithGemini } from './gemini';
 import { translateBatch, translateHtmlContent } from './translator';
@@ -17,6 +17,7 @@ type ProgressCallback = (progress: TranslationProgress) => void;
 export async function runTranslationPipeline(
   url: string,
   targetLang: string = 'ar',
+  full: boolean = false,
   onProgress?: ProgressCallback
 ): Promise<TranslationResult> {
   const startTime = Date.now();
@@ -43,13 +44,37 @@ export async function runTranslationPipeline(
     let result: TranslationResult;
 
     if (parsed.contentType === 'image' || parsed.contentType === 'mixed') {
-      result = await processImageContent(
-        parsed,
-        targetLang,
-        url,
-        startTime,
-        onProgress
-      );
+      if (full) {
+        result = await processImageContent(
+          parsed,
+          targetLang,
+          url,
+          startTime,
+          onProgress
+        );
+      } else {
+        // Multi-step translation: return image URLs list and detected language
+        onProgress?.({ stage: 'translating', progress: 50, message: 'Analyzing text blocks...' });
+        const ocrLangs = detectSourceLanguages(parsed.textBlocks, parsed.title);
+        
+        let textBlocks;
+        if (parsed.contentType === 'mixed' && parsed.textBlocks.length > 0) {
+          textBlocks = await translateHtmlContent(parsed.textBlocks, targetLang);
+        }
+
+        result = {
+          success: true,
+          title: parsed.title,
+          sourceUrl: url,
+          contentType: parsed.contentType,
+          images: parsed.images,
+          textBlocks,
+          langs: ocrLangs,
+          cached: false,
+          processedAt: new Date().toISOString(),
+          processingTimeMs: Date.now() - startTime,
+        };
+      }
     } else {
       result = await processTextContent(
         parsed,
@@ -241,5 +266,77 @@ function detectSourceLanguages(
 
   // Default to English only (dramatically increases accuracy and speed for scanlated manga)
   return ['eng'];
+}
+
+export async function processSinglePage(
+  imageUrl: string,
+  index: number,
+  targetLang: string = 'ar',
+  langs?: string[]
+): Promise<TranslatedPage> {
+  const cacheKey = `page::${imageUrl}::${targetLang}`;
+
+  // Check page-level cache
+  const cached = getCached<TranslatedPage>(cacheKey);
+  if (cached) {
+    console.log(`[Pipeline] Page ${index} cache hit.`);
+    return cached;
+  }
+
+  // 1. Process image (download and resize/sharp)
+  const img = await processImage(imageUrl, index);
+  
+  let overlays: TextOverlay[] = [];
+
+  // Try Gemini Vision OCR + Translation first
+  if (process.env.GEMINI_API_KEY) {
+    console.log(`[Pipeline] Using Gemini Vision for page ${index}...`);
+    const geminiResult = await translateImageWithGemini(
+      img.buffer,
+      img.mimeType,
+      img.width,
+      img.height
+    );
+    if (geminiResult) {
+      overlays = geminiResult;
+    }
+  }
+
+  // Fallback to Tesseract OCR + Google Translate
+  if (overlays.length === 0) {
+    console.log(`[Pipeline] Running Tesseract OCR fallback for page ${index}...`);
+    const ocrLangs = langs && langs.length > 0 ? langs : ['eng'];
+    const ocrResult = await runOCR(img.buffer, ocrLangs);
+    console.log(`[Pipeline] OCR page ${index}: words=${ocrResult.words.length}, confidence=${ocrResult.averageConfidence.toFixed(1)}`);
+
+    if (ocrResult.words.length > 0) {
+      const translationInputs = ocrResult.words.map((word, idx) => ({
+        text: word.text,
+        id: `img-${index}-word-${idx}`,
+      }));
+
+      const translations = await translateBatch(translationInputs, targetLang);
+      overlays = ocrResult.words.map((word, idx) => ({
+        originalText: word.text,
+        translatedText: translations[idx]?.translated || word.text,
+        bbox: word.bbox,
+        confidence: word.confidence,
+      }));
+    }
+  }
+
+  const resultPage: TranslatedPage = {
+    pageIndex: index,
+    imageUrl: img.originalSrc,
+    imageBase64: img.base64,
+    width: img.width,
+    height: img.height,
+    overlays,
+  };
+
+  // Cache the page-level translation
+  setCache(cacheKey, resultPage);
+
+  return resultPage;
 }
 

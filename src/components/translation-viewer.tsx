@@ -70,21 +70,51 @@ export function TranslationViewer({ result, onReset }: TranslationViewerProps) {
       {result.pages && result.pages.length > 0 && (
         <div className="manga-reader">
           {result.pages.map((page) => (
-            <div key={page.pageIndex} className="manga-page">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={page.imageBase64}
-                alt={`Page ${page.pageIndex + 1}`}
-                width={page.width}
-                height={page.height}
-                loading="lazy"
-              />
-              {showOverlays && page.overlays.length > 0 && (
-                <ImageOverlay
-                  overlays={page.overlays}
-                  imageWidth={page.width}
-                  imageHeight={page.height}
-                />
+            <div 
+              key={page.pageIndex} 
+              className="manga-page relative min-h-[300px] flex flex-col items-center justify-center bg-secondary/10 rounded-xl my-6 border border-border/10 overflow-hidden"
+              style={{ aspectRatio: page.width && page.height ? `${page.width}/${page.height}` : 'auto' }}
+            >
+              {page.loading ? (
+                <div className="flex flex-col items-center justify-center p-8 text-center space-y-4">
+                  <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-primary"></div>
+                  <div className="space-y-1">
+                    <p className="text-sm font-semibold text-foreground">Translating Page {page.pageIndex + 1}</p>
+                    <p className="text-xs text-muted-foreground/60">Running OCR & translating text bubbles...</p>
+                  </div>
+                </div>
+              ) : page.error ? (
+                <div className="flex flex-col items-center justify-center p-8 text-center space-y-3">
+                  <div className="rounded-full bg-destructive/10 p-3 text-destructive">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <circle cx="12" cy="12" r="10" />
+                      <line x1="12" y1="8" x2="12" y2="12" />
+                      <line x1="12" y1="16" x2="12.01" y2="16" />
+                    </svg>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm font-semibold text-destructive">Failed to translate Page {page.pageIndex + 1}</p>
+                    <p className="text-xs text-muted-foreground/60">{page.error}</p>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={page.imageBase64}
+                    alt={`Page ${page.pageIndex + 1}`}
+                    width={page.width}
+                    height={page.height}
+                    loading="lazy"
+                  />
+                  {showOverlays && page.overlays.length > 0 && (
+                    <ImageOverlay
+                      overlays={page.overlays}
+                      imageWidth={page.width}
+                      imageHeight={page.height}
+                    />
+                  )}
+                </>
               )}
             </div>
           ))}
