@@ -67,55 +67,76 @@ Guidelines:
 - Exclude scanlation credits, translator notes, website watermarks (e.g. readfirst at, mangacultivator, etc.), and sound effects (SFX) that are part of the art background unless they contain crucial plot dialogue.
 - Make the Arabic translation natural, fluent, and highly context-aware.`;
 
-    const response = await model.generateContent({
-      contents: [
-        {
-          role: 'user',
-          parts: [
+    let response: any;
+    let retries = 3;
+    let delay = 2000;
+
+    while (retries > 0) {
+      try {
+        response = await model.generateContent({
+          contents: [
             {
-              inlineData: {
-                mimeType,
-                data: base64Image,
-              },
-            },
-            {
-              text: prompt,
-            },
-          ],
-        },
-      ],
-      generationConfig: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: SchemaType.OBJECT,
-          properties: {
-            bubbles: {
-              type: SchemaType.ARRAY,
-              description: 'List of detected speech bubbles and text overlays',
-              items: {
-                type: SchemaType.OBJECT,
-                properties: {
-                  originalText: { type: SchemaType.STRING, description: 'Original text in English/Korean/Japanese' },
-                  translatedText: { type: SchemaType.STRING, description: 'Arabic translation of the text' },
-                  bbox: {
-                    type: SchemaType.OBJECT,
-                    properties: {
-                      ymin: { type: SchemaType.NUMBER, description: 'Top edge coordinate (0 to 1000)' },
-                      xmin: { type: SchemaType.NUMBER, description: 'Left edge coordinate (0 to 1000)' },
-                      ymax: { type: SchemaType.NUMBER, description: 'Bottom edge coordinate (0 to 1000)' },
-                      xmax: { type: SchemaType.NUMBER, description: 'Right edge coordinate (0 to 1000)' },
-                    },
-                    required: ['ymin', 'xmin', 'ymax', 'xmax'],
+              role: 'user',
+              parts: [
+                {
+                  inlineData: {
+                    mimeType,
+                    data: base64Image,
                   },
                 },
-                required: ['originalText', 'translatedText', 'bbox'],
+                {
+                  text: prompt,
+                },
+              ],
+            },
+          ],
+          generationConfig: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: SchemaType.OBJECT,
+              properties: {
+                bubbles: {
+                  type: SchemaType.ARRAY,
+                  description: 'List of detected speech bubbles and text overlays',
+                  items: {
+                    type: SchemaType.OBJECT,
+                    properties: {
+                      originalText: { type: SchemaType.STRING, description: 'Original text in English/Korean/Japanese' },
+                      translatedText: { type: SchemaType.STRING, description: 'Arabic translation of the text' },
+                      bbox: {
+                        type: SchemaType.OBJECT,
+                        properties: {
+                          ymin: { type: SchemaType.NUMBER, description: 'Top edge coordinate (0 to 1000)' },
+                          xmin: { type: SchemaType.NUMBER, description: 'Left edge coordinate (0 to 1000)' },
+                          ymax: { type: SchemaType.NUMBER, description: 'Bottom edge coordinate (0 to 1000)' },
+                          xmax: { type: SchemaType.NUMBER, description: 'Right edge coordinate (0 to 1000)' },
+                        },
+                        required: ['ymin', 'xmin', 'ymax', 'xmax'],
+                      },
+                    },
+                    required: ['originalText', 'translatedText', 'bbox'],
+                  },
+                },
               },
+              required: ['bubbles'],
             },
           },
-          required: ['bubbles'],
-        },
-      },
-    });
+        });
+        break; // Success
+      } catch (err: any) {
+        console.error(`[Gemini] API attempt failed. Retries left: ${retries - 1}. Error:`, err.message || err);
+        retries--;
+        if (retries === 0) throw err;
+        
+        console.log(`[Gemini] Waiting ${delay}ms before retrying...`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        delay *= 2;
+      }
+    }
+
+    if (!response) {
+      throw new Error('Failed to get a response from Gemini API');
+    }
 
     const text = response.response.text();
     if (!text) {

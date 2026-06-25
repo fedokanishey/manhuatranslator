@@ -103,7 +103,7 @@ export function useTranslation(): UseTranslationReturn {
         setProgress(15);
         setStatusMessage(`Starting page translation (0/${imagesList.length})...`);
 
-        const CONCURRENCY = 3;
+        const CONCURRENCY = 1;
         const imagesToTranslate = [...imagesList];
         let completedCount = 0;
 
