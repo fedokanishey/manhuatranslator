@@ -141,25 +141,31 @@ async function processImageContent(
     });
 
     let overlays: TextOverlay[] = [];
+    let geminiError: any = null;
 
     // Try Gemini Vision OCR + Translation first
     if (process.env.GEMINI_API_KEY) {
       console.log(`[Pipeline] Using Gemini Vision for image ${i}...`);
-      const geminiResult = await translateImageWithGemini(
-        img.buffer,
-        img.mimeType,
-        img.width,
-        img.height
-      );
-      if (geminiResult) {
-        overlays = geminiResult;
+      try {
+        const geminiResult = await translateImageWithGemini(
+          img.buffer,
+          img.mimeType,
+          img.width,
+          img.height
+        );
+        if (geminiResult) {
+          overlays = geminiResult;
+        }
+      } catch (err) {
+        console.error(`[Pipeline] Gemini failed for image ${i}:`, err);
+        geminiError = err;
       }
     }
 
     // Fallback to local Tesseract OCR + Google Translate
     if (overlays.length === 0) {
       if (process.env.VERCEL === '1') {
-        throw new Error('Local OCR (Tesseract) is disabled on Vercel. Please ensure GEMINI_API_KEY is configured in the environment variables.');
+        throw new Error(`Gemini translation failed: ${geminiError?.message || 'GEMINI_API_KEY is not configured'}. Local OCR (Tesseract) is disabled on Vercel.`);
       }
       console.log(`[Pipeline] Running Tesseract OCR for image ${i}...`);
       const ocrResult = await runOCR(img.buffer, ocrLangs);
@@ -290,25 +296,31 @@ export async function processSinglePage(
   const img = await processImage(imageUrl, index);
   
   let overlays: TextOverlay[] = [];
+  let geminiError: any = null;
 
   // Try Gemini Vision OCR + Translation first
   if (process.env.GEMINI_API_KEY) {
     console.log(`[Pipeline] Using Gemini Vision for page ${index}...`);
-    const geminiResult = await translateImageWithGemini(
-      img.buffer,
-      img.mimeType,
-      img.width,
-      img.height
-    );
-    if (geminiResult) {
-      overlays = geminiResult;
+    try {
+      const geminiResult = await translateImageWithGemini(
+        img.buffer,
+        img.mimeType,
+        img.width,
+        img.height
+      );
+      if (geminiResult) {
+        overlays = geminiResult;
+      }
+    } catch (err) {
+      console.error(`[Pipeline] Gemini failed for page ${index}:`, err);
+      geminiError = err;
     }
   }
 
   // Fallback to Tesseract OCR + Google Translate
   if (overlays.length === 0) {
     if (process.env.VERCEL === '1') {
-      throw new Error('Local OCR (Tesseract) is disabled on Vercel. Please ensure GEMINI_API_KEY is configured in the environment variables.');
+      throw new Error(`Gemini translation failed: ${geminiError?.message || 'GEMINI_API_KEY is not configured'}. Local OCR (Tesseract) is disabled on Vercel.`);
     }
     console.log(`[Pipeline] Running Tesseract OCR fallback for page ${index}...`);
     const ocrLangs = langs && langs.length > 0 ? langs : ['eng'];

@@ -170,7 +170,7 @@ Guidelines:
       };
     });
   } catch (error) {
-    console.error('[Gemini] Translation failed, falling back to local OCR:', error);
-    return null;
+    console.error('[Gemini] Translation failed:', error);
+    throw error;
   }
 }
