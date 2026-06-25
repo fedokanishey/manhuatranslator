@@ -1,8 +1,8 @@
-import { createWorker, OEM, PSM } from 'tesseract.js';
 import type { OCRResult, OCRWord, BoundingBox } from '@/types/translation';
 import { MIN_OCR_CONFIDENCE } from '../constants';
 
 export async function runOCR(imageBuffer: Buffer, langs: string[] = ['eng', 'jpn', 'kor', 'chi_sim']): Promise<OCRResult> {
+  const { createWorker, OEM, PSM } = await import('tesseract.js');
   const worker = await createWorker(langs, OEM.DEFAULT, {
     logger: () => {},
   });
