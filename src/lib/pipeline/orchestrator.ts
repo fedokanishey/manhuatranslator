@@ -165,7 +165,7 @@ async function processImageContent(
     // Fallback to local Tesseract OCR + Google Translate
     if (overlays.length === 0) {
       if (process.env.VERCEL === '1') {
-        throw new Error(`Gemini translation failed: ${geminiError?.message || 'GEMINI_API_KEY is not configured'}. Local OCR (Tesseract) is disabled on Vercel.`);
+        throw new Error(`Gemini: ${geminiError?.message || 'Key missing'}`);
       }
       console.log(`[Pipeline] Running Tesseract OCR for image ${i}...`);
       const ocrResult = await runOCR(img.buffer, ocrLangs);
@@ -320,7 +320,7 @@ export async function processSinglePage(
   // Fallback to Tesseract OCR + Google Translate
   if (overlays.length === 0) {
     if (process.env.VERCEL === '1') {
-      throw new Error(`Gemini translation failed: ${geminiError?.message || 'GEMINI_API_KEY is not configured'}. Local OCR (Tesseract) is disabled on Vercel.`);
+      throw new Error(`Gemini: ${geminiError?.message || 'Key missing'}`);
     }
     console.log(`[Pipeline] Running Tesseract OCR fallback for page ${index}...`);
     const ocrLangs = langs && langs.length > 0 ? langs : ['eng'];

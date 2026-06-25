@@ -124,7 +124,7 @@ Guidelines:
         });
         break; // Success
       } catch (err: any) {
-        console.error(`[Gemini] API attempt failed. Retries left: ${retries - 1}. Error:`, err.message || err);
+        console.error(`[Gemini] API attempt failed. Retries left: ${retries - 1}. Error: ${err.message || err}`);
         retries--;
         if (retries === 0) throw err;
         
