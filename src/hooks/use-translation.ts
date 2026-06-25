@@ -121,7 +121,16 @@ export function useTranslation(): UseTranslationReturn {
             });
 
             if (!pageRes.ok) {
-              throw new Error(`HTTP ${pageRes.status}`);
+              let errorMsg = `HTTP ${pageRes.status}`;
+              try {
+                const errData = await pageRes.json();
+                if (errData && errData.error) {
+                  errorMsg = errData.error;
+                }
+              } catch (e) {
+                // Ignore
+              }
+              throw new Error(errorMsg);
             }
 
             const pageData = await pageRes.json();
