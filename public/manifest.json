@@ -1,0 +1,29 @@
+{
+  "name": "MangaLens — AI Manga Translator",
+  "short_name": "MangaLens",
+  "description": "AI-Powered Manga & Manhwa Translator — Instant Arabic translations with OCR",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0d0a14",
+  "theme_color": "#1a1025",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "categories": ["entertainment", "productivity"]
+}

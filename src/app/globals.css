@@ -1,26 +1,246 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+@custom-variant dark (&:is(.dark *));
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
+  --font-sans: var(--font-sans);
   --font-mono: var(--font-geist-mono);
+  --font-heading: var(--font-sans);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+/* We force dark mode — manga aesthetic */
+:root {
+  --background: oklch(0.1 0.02 280);
+  --foreground: oklch(0.95 0.01 280);
+  --card: oklch(0.15 0.025 280);
+  --card-foreground: oklch(0.95 0.01 280);
+  --popover: oklch(0.15 0.025 280);
+  --popover-foreground: oklch(0.95 0.01 280);
+  --primary: oklch(0.7 0.18 280);
+  --primary-foreground: oklch(0.98 0.005 280);
+  --secondary: oklch(0.2 0.03 280);
+  --secondary-foreground: oklch(0.9 0.01 280);
+  --muted: oklch(0.18 0.02 280);
+  --muted-foreground: oklch(0.65 0.02 280);
+  --accent: oklch(0.65 0.2 330);
+  --accent-foreground: oklch(0.98 0.005 280);
+  --destructive: oklch(0.6 0.22 25);
+  --border: oklch(0.25 0.03 280);
+  --input: oklch(0.2 0.03 280);
+  --ring: oklch(0.7 0.18 280);
+  --chart-1: oklch(0.7 0.18 280);
+  --chart-2: oklch(0.65 0.2 330);
+  --chart-3: oklch(0.6 0.15 200);
+  --chart-4: oklch(0.7 0.15 140);
+  --chart-5: oklch(0.65 0.18 50);
+  --radius: 0.75rem;
+  --sidebar: oklch(0.12 0.02 280);
+  --sidebar-foreground: oklch(0.95 0.01 280);
+  --sidebar-primary: oklch(0.7 0.18 280);
+  --sidebar-primary-foreground: oklch(0.98 0.005 280);
+  --sidebar-accent: oklch(0.2 0.03 280);
+  --sidebar-accent-foreground: oklch(0.9 0.01 280);
+  --sidebar-border: oklch(0.25 0.03 280);
+  --sidebar-ring: oklch(0.7 0.18 280);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+/* Custom utility classes */
+@layer utilities {
+  .text-gradient {
+    background: linear-gradient(135deg, oklch(0.75 0.2 280), oklch(0.7 0.22 330), oklch(0.65 0.18 200));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .bg-gradient-hero {
+    background: 
+      radial-gradient(ellipse at 20% 50%, oklch(0.25 0.1 280 / 40%) 0%, transparent 50%),
+      radial-gradient(ellipse at 80% 20%, oklch(0.2 0.12 330 / 30%) 0%, transparent 50%),
+      radial-gradient(ellipse at 50% 80%, oklch(0.15 0.08 200 / 20%) 0%, transparent 50%),
+      oklch(0.08 0.02 280);
+  }
+
+  .glass-card {
+    background: oklch(0.15 0.025 280 / 60%);
+    backdrop-filter: blur(12px) saturate(150%);
+    border: 1px solid oklch(0.3 0.04 280 / 30%);
+  }
+
+  .glow-purple {
+    box-shadow: 
+      0 0 20px oklch(0.6 0.18 280 / 20%),
+      0 0 60px oklch(0.5 0.15 280 / 10%);
+  }
+
+  .glow-pink {
+    box-shadow: 
+      0 0 20px oklch(0.6 0.2 330 / 20%),
+      0 0 60px oklch(0.5 0.18 330 / 10%);
+  }
+
+  .animate-float {
+    animation: float 6s ease-in-out infinite;
+  }
+
+  .animate-pulse-slow {
+    animation: pulse 4s ease-in-out infinite;
+  }
+
+  .animate-shimmer {
+    animation: shimmer 2.5s linear infinite;
+    background-size: 200% 100%;
+  }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-10px); }
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* Manga reader styles */
+.manga-reader {
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+.manga-page {
+  position: relative;
+  width: 100%;
+  margin-bottom: 2px;
+  line-height: 0;
+  container-type: inline-size;
+}
+
+.manga-page img {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.text-overlay-container {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.text-overlay-box {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  direction: rtl;
+  font-family: var(--font-arabic), 'Segoe UI', sans-serif;
+  font-weight: 700;
+  color: #000000;
+  background: #ffffff;
+  border-radius: 18px;
+  padding: 2px 6px;
+  line-height: 1.2;
+  pointer-events: auto;
+  cursor: default;
+  box-shadow: 0 0 5px 3px #ffffff;
+  transition: all 0.2s ease;
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}
+
+.text-overlay-box:hover {
+  background: #ffffff;
+  box-shadow: 0 0 7px 4px #ffffff;
+  transform: scale(1.02);
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: oklch(0.1 0.02 280);
+}
+
+::-webkit-scrollbar-thumb {
+  background: oklch(0.3 0.05 280);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: oklch(0.4 0.08 280);
+}
+
+/* Progress bar */
+.progress-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: oklch(0.2 0.03 280);
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, oklch(0.7 0.18 280), oklch(0.65 0.2 330));
+  transition: width 0.5s ease-out;
 }
