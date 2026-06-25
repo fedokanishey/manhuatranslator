@@ -55,7 +55,7 @@ export async function translateImageWithGemini(
 
   try {
     const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
     const base64Image = imageBuffer.toString('base64');
 
     const prompt = `Analyze this manga/manhwa page. Detect all speech bubbles, narrator boxes, and text blocks.
