@@ -19,7 +19,7 @@ interface GeminiResponse {
   bubbles: GeminiBubble[];
 }
 
-function getApiKey(): string | undefined {
+export function getApiKey(): string | undefined {
   if (process.env.GEMINI_API_KEY) {
     return process.env.GEMINI_API_KEY;
   }
@@ -40,6 +40,41 @@ function getApiKey(): string | undefined {
   }
   
   return undefined;
+}
+
+export const GEMINI_MODELS = [
+  'gemini-2.5-flash',
+  'gemini-2.0-flash',
+  'gemini-1.5-flash',
+  'gemini-2.5-pro',
+  'gemini-1.5-pro',
+  'gemini-3.1-flash-lite'
+];
+
+export async function tryGeminiModels<T>(
+  apiKey: string,
+  executeFn: (model: any) => Promise<T>
+): Promise<T> {
+  const genAI = new GoogleGenerativeAI(apiKey);
+  let lastError: any = null;
+
+  for (const modelName of GEMINI_MODELS) {
+    try {
+      console.log(`[Gemini] Attempting call with model: ${modelName}...`);
+      const model = genAI.getGenerativeModel({ model: modelName });
+      const result = await executeFn(model);
+      console.log(`[Gemini] Success using model: ${modelName}`);
+      return result;
+    } catch (err: any) {
+      console.warn(`[Gemini] Model ${modelName} failed or quota exceeded:`, err.message || err);
+      lastError = err;
+      if (err.message && (err.message.includes('API key not valid') || err.message.includes('key is invalid'))) {
+        throw err;
+      }
+    }
+  }
+
+  throw new Error(`All Gemini models failed. Last error: ${lastError?.message || lastError}`);
 }
 
 export async function translateImageWithGemini(
@@ -136,8 +171,6 @@ async function translateSingleImageWithGemini(
   apiKey: string
 ): Promise<TextOverlay[] | null> {
   try {
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: 'gemini-3.1-flash-lite' });
     const base64Image = imageBuffer.toString('base64');
 
     const prompt = `You are a manga/manhwa translator. Analyze this page image and find every speech bubble, narrator box, and text block.
@@ -161,72 +194,72 @@ What to include:
 What to exclude:
 - Scanlation credits, translator notes, watermarks (e.g. "read first at", "mangacultivator"), and purely decorative SFX.`;
 
-    let response: any;
-    let retries = 3;
-    let delay = 500;
-
-    while (retries > 0) {
-      try {
-        response = await model.generateContent({
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  inlineData: {
-                    mimeType,
-                    data: base64Image,
-                  },
-                },
-                {
-                  text: prompt,
-                },
-              ],
-            },
-          ],
-          generationConfig: {
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: SchemaType.OBJECT,
-              properties: {
-                bubbles: {
-                  type: SchemaType.ARRAY,
-                  description: 'List of detected speech bubbles and text overlays',
-                  items: {
-                    type: SchemaType.OBJECT,
-                    properties: {
-                      originalText: { type: SchemaType.STRING, description: 'Original text in English/Korean/Japanese' },
-                      translatedText: { type: SchemaType.STRING, description: 'Arabic translation of the text' },
-                      bbox: {
-                        type: SchemaType.OBJECT,
-                        properties: {
-                          ymin: { type: SchemaType.NUMBER, description: 'Top edge coordinate (0 to 1000)' },
-                          xmin: { type: SchemaType.NUMBER, description: 'Left edge coordinate (0 to 1000)' },
-                          ymax: { type: SchemaType.NUMBER, description: 'Bottom edge coordinate (0 to 1000)' },
-                          xmax: { type: SchemaType.NUMBER, description: 'Right edge coordinate (0 to 1000)' },
-                        },
-                        required: ['ymin', 'xmin', 'ymax', 'xmax'],
-                      },
+    const response = await tryGeminiModels(apiKey, async (model) => {
+      let retries = 2;
+      let delay = 300;
+      while (retries > 0) {
+        try {
+          return await model.generateContent({
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType,
+                      data: base64Image,
                     },
-                    required: ['originalText', 'translatedText', 'bbox'],
+                  },
+                  {
+                    text: prompt,
+                  },
+                ],
+              },
+            ],
+            generationConfig: {
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: SchemaType.OBJECT,
+                properties: {
+                  bubbles: {
+                    type: SchemaType.ARRAY,
+                    description: 'List of detected speech bubbles and text overlays',
+                    items: {
+                      type: SchemaType.OBJECT,
+                      properties: {
+                        originalText: { type: SchemaType.STRING, description: 'Original text in English/Korean/Japanese' },
+                        translatedText: { type: SchemaType.STRING, description: 'Arabic translation of the text' },
+                        bbox: {
+                          type: SchemaType.OBJECT,
+                          properties: {
+                            ymin: { type: SchemaType.NUMBER, description: 'Top edge coordinate (0 to 1000)' },
+                            xmin: { type: SchemaType.NUMBER, description: 'Left edge coordinate (0 to 1000)' },
+                            ymax: { type: SchemaType.NUMBER, description: 'Bottom edge coordinate (0 to 1000)' },
+                            xmax: { type: SchemaType.NUMBER, description: 'Right edge coordinate (0 to 1000)' },
+                          },
+                          required: ['ymin', 'xmin', 'ymax', 'xmax'],
+                        },
+                      },
+                      required: ['originalText', 'translatedText', 'bbox'],
+                    },
                   },
                 },
+                required: ['bubbles'],
               },
-              required: ['bubbles'],
             },
-          },
-        });
-        break;
-      } catch (err: any) {
-        console.error(`[Gemini] API attempt failed. Retries left: ${retries - 1}. Error: ${err.message || err}`);
-        retries--;
-        if (retries === 0) throw err;
-        
-        console.log(`[Gemini] Waiting ${delay}ms before retrying...`);
-        await new Promise((resolve) => setTimeout(resolve, delay));
-        delay *= 2;
+          });
+        } catch (err: any) {
+          // If it's a quota / limit error, we should NOT retry this model, throw to proceed to next model!
+          if (err.message && (err.message.includes('429') || err.message.includes('quota') || err.message.includes('Limit'))) {
+            throw err;
+          }
+          retries--;
+          if (retries === 0) throw err;
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          delay *= 2;
+        }
       }
-    }
+    });
 
     if (!response) {
       throw new Error('Failed to get a response from Gemini API');
