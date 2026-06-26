@@ -1,6 +1,6 @@
 import translate from 'google-translate-api-x';
 import { DEFAULT_TARGET_LANG } from '../constants';
-import { getApiKey, tryGeminiModels } from './gemini';
+import { getApiKey, tryGeminiModels, getOpenRouterKey, tryOpenRouterModels } from './gemini';
 import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 
 export interface TranslationInput {
@@ -20,31 +20,51 @@ async function translateTextWithGemini(
   targetLang: string
 ): Promise<string> {
   const apiKey = getApiKey();
-  if (!apiKey) throw new Error('Gemini API key not found');
+  const openRouterKey = getOpenRouterKey();
+  if (!apiKey && !openRouterKey) throw new Error('No API key found for Gemini or OpenRouter');
 
-  const response = await tryGeminiModels(apiKey, async (model) => {
-    return await model.generateContent({
-      contents: [
+  if (openRouterKey) {
+    try {
+      console.log('[Translator/OpenRouter] Translating single text block...');
+      return await tryOpenRouterModels(openRouterKey, [
         {
           role: 'user',
-          parts: [
-            {
-              text: `Translate the following text to natural, fluent ${targetLang}. Only return the translation, nothing else. Do not add quotes unless they were in the original text.\n\nText: ${text}`
-            }
-          ]
+          content: `Translate the following text to natural, fluent ${targetLang}. Only return the translation, nothing else. Do not add quotes unless they were in the original text.\n\nText: ${text}`
         }
-      ],
-      generationConfig: {
-        temperature: 0.3,
-      }
-    });
-  });
-
-  const translated = response.response.text().trim();
-  if (!translated) {
-    throw new Error('Gemini returned empty translation');
+      ], false, 500);
+    } catch (err) {
+      console.error('[Translator/OpenRouter] OpenRouter translation failed:', err);
+      // Fall through to direct Gemini
+    }
   }
-  return translated;
+
+  if (apiKey) {
+    const response = await tryGeminiModels(apiKey, async (model) => {
+      return await model.generateContent({
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: `Translate the following text to natural, fluent ${targetLang}. Only return the translation, nothing else. Do not add quotes unless they were in the original text.\n\nText: ${text}`
+              }
+            ]
+          }
+        ],
+        generationConfig: {
+          temperature: 0.3,
+        }
+      });
+    });
+
+    const translated = response.response.text().trim();
+    if (!translated) {
+      throw new Error('Gemini returned empty translation');
+    }
+    return translated;
+  }
+
+  throw new Error('Both OpenRouter and Gemini direct translations failed.');
 }
 
 async function translateBatchWithGemini(
@@ -52,7 +72,8 @@ async function translateBatchWithGemini(
   targetLang: string
 ): Promise<TranslationOutput[]> {
   const apiKey = getApiKey();
-  if (!apiKey) throw new Error('Gemini API key not found');
+  const openRouterKey = getOpenRouterKey();
+  if (!apiKey && !openRouterKey) throw new Error('No API key found for Gemini or OpenRouter');
 
   const prompt = `Translate the following list of manga text blocks into natural, fluent ${targetLang}. 
 Maintain the context across the blocks so the dialogue flows naturally.
@@ -66,42 +87,68 @@ Example output:
   ]
 }`;
 
-  const response = await tryGeminiModels(apiKey, async (model) => {
-    return await model.generateContent({
-      contents: [
+  let responseText = '';
+
+  if (openRouterKey) {
+    try {
+      console.log(`[Translator/OpenRouter] Translating batch of ${inputs.length} text blocks...`);
+      responseText = await tryOpenRouterModels(openRouterKey, [
         {
           role: 'user',
-          parts: [
-            {
-              text: `${prompt}\n\nInput blocks:\n${JSON.stringify(inputs.map(i => ({ id: i.id, text: i.text })), null, 2)}`
-            }
-          ]
+          content: `${prompt}\n\nInput blocks:\n${JSON.stringify(inputs.map(i => ({ id: i.id, text: i.text })), null, 2)}`
         }
-      ],
-      generationConfig: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: SchemaType.OBJECT,
-          properties: {
-            translations: {
-              type: SchemaType.ARRAY,
-              items: {
-                type: SchemaType.OBJECT,
-                properties: {
-                  id: { type: SchemaType.STRING },
-                  translated: { type: SchemaType.STRING }
-                },
-                required: ['id', 'translated']
-              }
-            }
-          },
-          required: ['translations']
-        }
-      }
-    });
-  });
+      ], true, 1500);
+    } catch (err) {
+      console.error('[Translator/OpenRouter] OpenRouter batch translation failed:', err);
+      // Fall through to direct Gemini
+    }
+  }
 
-  const responseText = response.response.text();
+  if (!responseText && apiKey) {
+    const response = await tryGeminiModels(apiKey, async (model) => {
+      return await model.generateContent({
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: `${prompt}\n\nInput blocks:\n${JSON.stringify(inputs.map(i => ({ id: i.id, text: i.text })), null, 2)}`
+              }
+            ]
+          }
+        ],
+        generationConfig: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: SchemaType.OBJECT,
+            properties: {
+              translations: {
+                type: SchemaType.ARRAY,
+                items: {
+                  type: SchemaType.OBJECT,
+                  properties: {
+                    id: { type: SchemaType.STRING },
+                    translated: { type: SchemaType.STRING }
+                  },
+                  required: ['id', 'translated']
+                }
+              }
+            },
+            required: ['translations']
+          }
+        }
+      });
+    });
+
+    if (response) {
+      responseText = response.response.text();
+    }
+  }
+
+  if (!responseText) {
+    throw new Error('Failed to get a batch translation response from either OpenRouter or Gemini API');
+  }
+
   const data = JSON.parse(responseText);
   
   return inputs.map(input => {
@@ -128,9 +175,11 @@ export async function translateText(
     };
   }
 
-  if (getApiKey()) {
+  const apiKey = getApiKey();
+  const openRouterKey = getOpenRouterKey();
+  if (apiKey || openRouterKey) {
     try {
-      console.log(`[Translator] Translating single text with Gemini to ${targetLang}...`);
+      console.log(`[Translator] Translating single text with AI to ${targetLang}...`);
       const translated = await translateTextWithGemini(text, targetLang);
       return {
         id: '',
@@ -139,7 +188,7 @@ export async function translateText(
         detectedLanguage: 'unknown',
       };
     } catch (err) {
-      console.error('[Translator] Gemini translation failed, falling back to Google Translate:', err);
+      console.error('[Translator] AI translation failed, falling back to Google Translate:', err);
     }
   }
 
@@ -170,12 +219,14 @@ export async function translateBatch(
 ): Promise<TranslationOutput[]> {
   if (inputs.length === 0) return [];
 
-  if (getApiKey()) {
+  const apiKey = getApiKey();
+  const openRouterKey = getOpenRouterKey();
+  if (apiKey || openRouterKey) {
     try {
-      console.log(`[Translator] Translating batch of ${inputs.length} text blocks with Gemini to ${targetLang}...`);
+      console.log(`[Translator] Translating batch of ${inputs.length} text blocks with AI to ${targetLang}...`);
       return await translateBatchWithGemini(inputs, targetLang);
     } catch (err) {
-      console.error('[Translator] Gemini batch translation failed, falling back to Google Translate chunks:', err);
+      console.error('[Translator] AI batch translation failed, falling back to Google Translate chunks:', err);
     }
   }
 

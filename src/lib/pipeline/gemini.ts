@@ -77,6 +77,90 @@ export async function tryGeminiModels<T>(
   throw new Error(`All Gemini models failed. Last error: ${lastError?.message || lastError}`);
 }
 
+export function getOpenRouterKey(): string | undefined {
+  if (process.env.OPENROUTER_API_KEY) {
+    return process.env.OPENROUTER_API_KEY;
+  }
+  
+  try {
+    const dotenvPath = path.join(process.cwd(), '.env.local');
+    if (fs.existsSync(dotenvPath)) {
+      const content = fs.readFileSync(dotenvPath, 'utf-8');
+      const match = content.match(/OPENROUTER_API_KEY\s*=\s*["']?([^"'\r\n]+)["']?/);
+      if (match && match[1]) {
+        console.log('[OpenRouter] Loaded API key dynamically from .env.local');
+        return match[1];
+      }
+    }
+  } catch (e) {
+    console.error('[OpenRouter] Failed to read .env.local manually:', e);
+  }
+  
+  return undefined;
+}
+
+export const OPENROUTER_MODELS = [
+  'google/gemini-2.5-flash',
+  'google/gemini-2.5-pro',
+  'openrouter/free'
+];
+
+export async function tryOpenRouterModels(
+  apiKey: string,
+  messages: any[],
+  jsonMode: boolean = false,
+  maxTokens: number = 3000
+): Promise<string> {
+  let lastError: any = null;
+
+  for (const modelName of OPENROUTER_MODELS) {
+    try {
+      console.log(`[OpenRouter] Attempting call with model: ${modelName}...`);
+      const headers: Record<string, string> = {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "http://localhost:3000",
+        "X-Title": "Manga Translator"
+      };
+
+      const body: any = {
+        model: modelName,
+        messages,
+        max_tokens: maxTokens
+      };
+
+      if (jsonMode) {
+        body.response_format = { type: "json_object" };
+      }
+
+      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body)
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`OpenRouter HTTP ${response.status}: ${errorText}`);
+      }
+
+      const data = await response.json();
+      const text = data.choices?.[0]?.message?.content;
+      if (!text) {
+        throw new Error("OpenRouter returned empty response content");
+      }
+
+      console.log(`[OpenRouter] Success using model: ${modelName}`);
+      return text;
+    } catch (err: any) {
+      console.warn(`[OpenRouter] Model ${modelName} failed or quota exceeded:`, err.message || err);
+      lastError = err;
+    }
+  }
+
+  throw new Error(`All OpenRouter models failed. Last error: ${lastError?.message || lastError}`);
+}
+
 export async function translateImageWithGemini(
   imageBuffer: Buffer,
   mimeType: string,
@@ -84,8 +168,9 @@ export async function translateImageWithGemini(
   imageHeight: number
 ): Promise<TextOverlay[] | null> {
   const apiKey = getApiKey();
-  if (!apiKey) {
-    console.log('[Gemini] GEMINI_API_KEY is not configured. Skipping.');
+  const openRouterKey = getOpenRouterKey();
+  if (!apiKey && !openRouterKey) {
+    console.log('[Gemini/OpenRouter] Neither GEMINI_API_KEY nor OPENROUTER_API_KEY is configured. Skipping.');
     return null;
   }
 
@@ -119,7 +204,8 @@ export async function translateImageWithGemini(
             mimeType,
             imageWidth,
             currentHeight,
-            apiKey
+            apiKey,
+            openRouterKey
           );
 
           if (!sliceOverlays) return [];
@@ -159,7 +245,8 @@ export async function translateImageWithGemini(
     mimeType,
     imageWidth,
     imageHeight,
-    apiKey
+    apiKey,
+    openRouterKey
   );
 }
 
@@ -168,111 +255,144 @@ async function translateSingleImageWithGemini(
   mimeType: string,
   imageWidth: number,
   imageHeight: number,
-  apiKey: string
+  apiKey: string | undefined,
+  openRouterKey: string | undefined
 ): Promise<TextOverlay[] | null> {
   try {
     const base64Image = imageBuffer.toString('base64');
 
-    const prompt = `You are a manga/manhwa translator. Analyze this page image and find every speech bubble, narrator box, and text block.
+    const prompt = `You are a manga/manhwa translator. Analyze this page image and find every speech bubble, narrator box, and text block containing dialogue, narration, or spoken words.
 
-For each one:
+For each text element detected:
 1. Extract the original text exactly as written.
 2. Translate it into natural, fluent manga-style Arabic.
-3. Return the bounding box of the INNER AREA of the speech bubble or narrator box (just inside the outer outlines/borders).
+3. Return the bounding box of the INNER AREA of the speech bubble or narrator box (just inside the outer outlines/borders) or a tight bounding box around the text if it is written directly on the artwork without borders.
 
 Bounding box format: ymin, xmin, ymax, xmax — normalized to a 0–1000 scale relative to image height and width.
 
 IMPORTANT — bounding box accuracy:
-- The bbox MUST cover the inside region of the speech bubble or narrator box where the text resides, but stay strictly INSIDE the black outlines/borders. I will use this bbox to place an opaque background rectangle to mask the original English text and render the Arabic translation centered inside it.
-- Do NOT include the black outer outlines/borders of the speech bubbles in the bbox (so we don't cover or overwrite them).
-- ymin = top edge of the inside bubble region, ymax = bottom edge of the inside bubble region.
-- xmin = left edge of the inside bubble region, xmax = right edge of the inside bubble region.
+- If the text is inside a speech bubble or narrator box: The bbox MUST cover the inside region of the speech bubble or narrator box where the text resides, but stay strictly INSIDE the black outlines/borders. I will use this bbox to place an opaque background rectangle to mask the original English text and render the Arabic translation centered inside it. Do NOT include the outer outlines/borders of the speech bubbles in the bbox (so we don't cover or overwrite them).
+- If the text is written directly on the background/artwork and has no outline/border: Return a tight bounding box wrapping the text lines.
+- ymin = top edge of the region, ymax = bottom edge of the region.
+- xmin = left edge of the region, xmax = right edge of the region.
 
 What to include:
 - All dialogue, narration, and thought bubbles.
+- Any other text blocks, captions, or text written directly on the background containing spoken words or conversation.
+- Even if a text block does not have a speech bubble outline or border, you MUST still detect it.
 
 What to exclude:
-- Scanlation credits, translator notes, watermarks (e.g. "read first at", "mangacultivator"), and purely decorative SFX.`;
+- Scanlation credits, website URLs, translator notes, watermarks, and purely decorative/non-verbal SFX (like "WOOSH", "BAM", "CLANG").`;
 
-    const response = await tryGeminiModels(apiKey, async (model) => {
-      let retries = 2;
-      let delay = 300;
-      while (retries > 0) {
-        try {
-          return await model.generateContent({
-            contents: [
+    let responseText = '';
+
+    // 1. Try OpenRouter first if key is present
+    if (openRouterKey) {
+      try {
+        console.log('[Gemini/OpenRouter] Attempting vision translation via OpenRouter...');
+        responseText = await tryOpenRouterModels(openRouterKey, [
+          {
+            role: 'user',
+            content: [
               {
-                role: 'user',
-                parts: [
-                  {
-                    inlineData: {
-                      mimeType,
-                      data: base64Image,
-                    },
-                  },
-                  {
-                    text: prompt,
-                  },
-                ],
+                type: 'text',
+                text: prompt
               },
-            ],
-            generationConfig: {
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: SchemaType.OBJECT,
-                properties: {
-                  bubbles: {
-                    type: SchemaType.ARRAY,
-                    description: 'List of detected speech bubbles and text overlays',
-                    items: {
-                      type: SchemaType.OBJECT,
-                      properties: {
-                        originalText: { type: SchemaType.STRING, description: 'Original text in English/Korean/Japanese' },
-                        translatedText: { type: SchemaType.STRING, description: 'Arabic translation of the text' },
-                        bbox: {
-                          type: SchemaType.OBJECT,
-                          properties: {
-                            ymin: { type: SchemaType.NUMBER, description: 'Top edge coordinate (0 to 1000)' },
-                            xmin: { type: SchemaType.NUMBER, description: 'Left edge coordinate (0 to 1000)' },
-                            ymax: { type: SchemaType.NUMBER, description: 'Bottom edge coordinate (0 to 1000)' },
-                            xmax: { type: SchemaType.NUMBER, description: 'Right edge coordinate (0 to 1000)' },
-                          },
-                          required: ['ymin', 'xmin', 'ymax', 'xmax'],
-                        },
-                      },
-                      required: ['originalText', 'translatedText', 'bbox'],
-                    },
-                  },
-                },
-                required: ['bubbles'],
-              },
-            },
-          });
-        } catch (err: any) {
-          // If it's a quota / limit error, we should NOT retry this model, throw to proceed to next model!
-          if (err.message && (err.message.includes('429') || err.message.includes('quota') || err.message.includes('Limit'))) {
-            throw err;
+              {
+                type: 'image_url',
+                image_url: {
+                  url: `data:${mimeType};base64,${base64Image}`
+                }
+              }
+            ]
           }
-          retries--;
-          if (retries === 0) throw err;
-          await new Promise((resolve) => setTimeout(resolve, delay));
-          delay *= 2;
-        }
+        ], true);
+      } catch (err) {
+        console.error('[Gemini/OpenRouter] OpenRouter vision translation failed:', err);
+        // Fall through to direct Gemini
       }
-    });
-
-    if (!response) {
-      throw new Error('Failed to get a response from Gemini API');
     }
 
-    const text = response.response.text();
-    if (!text) {
-      throw new Error('Empty response from Gemini API');
+    // 2. Try direct Gemini key if present and OpenRouter failed/was not used
+    if (!responseText && apiKey) {
+      const response = await tryGeminiModels(apiKey, async (model) => {
+        let retries = 2;
+        let delay = 300;
+        while (retries > 0) {
+          try {
+            return await model.generateContent({
+              contents: [
+                {
+                  role: 'user',
+                  parts: [
+                    {
+                      inlineData: {
+                        mimeType,
+                        data: base64Image,
+                      },
+                    },
+                    {
+                      text: prompt,
+                    },
+                  ],
+                },
+              ],
+              generationConfig: {
+                responseMimeType: 'application/json',
+                responseSchema: {
+                  type: SchemaType.OBJECT,
+                  properties: {
+                    bubbles: {
+                      type: SchemaType.ARRAY,
+                      description: 'List of detected speech bubbles and text overlays',
+                      items: {
+                        type: SchemaType.OBJECT,
+                        properties: {
+                          originalText: { type: SchemaType.STRING, description: 'Original text in English/Korean/Japanese' },
+                          translatedText: { type: SchemaType.STRING, description: 'Arabic translation of the text' },
+                          bbox: {
+                            type: SchemaType.OBJECT,
+                            properties: {
+                              ymin: { type: SchemaType.NUMBER, description: 'Top edge coordinate (0 to 1000)' },
+                              xmin: { type: SchemaType.NUMBER, description: 'Left edge coordinate (0 to 1000)' },
+                              ymax: { type: SchemaType.NUMBER, description: 'Bottom edge coordinate (0 to 1000)' },
+                              xmax: { type: SchemaType.NUMBER, description: 'Right edge coordinate (0 to 1000)' },
+                            },
+                            required: ['ymin', 'xmin', 'ymax', 'xmax'],
+                          },
+                        },
+                        required: ['originalText', 'translatedText', 'bbox'],
+                      },
+                    },
+                  },
+                  required: ['bubbles'],
+                },
+              },
+            });
+          } catch (err: any) {
+            if (err.message && (err.message.includes('429') || err.message.includes('quota') || err.message.includes('Limit'))) {
+              throw err;
+            }
+            retries--;
+            if (retries === 0) throw err;
+            await new Promise((resolve) => setTimeout(resolve, delay));
+            delay *= 2;
+          }
+        }
+      });
+
+      if (response) {
+        responseText = response.response.text();
+      }
     }
 
-    const result = JSON.parse(text) as GeminiResponse;
+    if (!responseText) {
+      throw new Error('Failed to get a response from either OpenRouter or Gemini API');
+    }
+
+    const result = JSON.parse(responseText) as GeminiResponse;
     if (!result.bubbles || !Array.isArray(result.bubbles)) {
-      throw new Error('Invalid JSON structure returned by Gemini');
+      throw new Error('Invalid JSON structure returned by Gemini/OpenRouter');
     }
 
     return result.bubbles.map((b) => {
@@ -294,7 +414,7 @@ What to exclude:
       };
     });
   } catch (error) {
-    console.error('[Gemini] Vision call failed:', error);
+    console.error('[Gemini/OpenRouter] Vision call failed:', error);
     throw error;
   }
 }
