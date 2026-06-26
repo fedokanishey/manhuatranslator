@@ -2,6 +2,7 @@ import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 import type { TextOverlay, BoundingBox } from '@/types/translation';
 import * as fs from 'fs';
 import * as path from 'path';
+import sharp from 'sharp';
 
 interface GeminiBubble {
   originalText: string;
@@ -53,23 +54,116 @@ export async function translateImageWithGemini(
     return null;
   }
 
+  const MAX_SLICE_HEIGHT = 1600;
+  if (imageHeight > MAX_SLICE_HEIGHT) {
+    const sliceHeight = 1200;
+    const overlap = 150;
+    const step = sliceHeight - overlap;
+
+    console.log(`[Gemini] Image is very tall (${imageHeight}px). Slicing into standard chunks of ${sliceHeight}px vertically to prevent coordinate distortion...`);
+
+    const slicePromises: Promise<TextOverlay[]>[] = [];
+    let top = 0;
+    let sliceIdx = 0;
+
+    while (top < imageHeight) {
+      const currentTop = top;
+      const currentHeight = Math.min(sliceHeight, imageHeight - currentTop);
+      const currentIdx = sliceIdx;
+
+      slicePromises.push((async () => {
+        try {
+          console.log(`[Gemini] Extracting slice ${currentIdx} (top: ${currentTop}, height: ${currentHeight})...`);
+          
+          const sliceBuffer = await sharp(imageBuffer)
+            .extract({ left: 0, top: currentTop, width: imageWidth, height: currentHeight })
+            .toBuffer();
+
+          const sliceOverlays = await translateSingleImageWithGemini(
+            sliceBuffer,
+            mimeType,
+            imageWidth,
+            currentHeight,
+            apiKey
+          );
+
+          if (!sliceOverlays) return [];
+
+          // Offset the y coordinate by the slice's top position
+          return sliceOverlays.map(overlay => ({
+            ...overlay,
+            bbox: {
+              ...overlay.bbox,
+              y: overlay.bbox.y + currentTop,
+            }
+          }));
+        } catch (err) {
+          console.error(`[Gemini] Failed to translate slice ${currentIdx} (top: ${currentTop}):`, err);
+          return [];
+        }
+      })());
+
+      if (top + currentHeight >= imageHeight) {
+        break;
+      }
+      top += step;
+      sliceIdx++;
+    }
+
+    const allSlicesOverlays = await Promise.all(slicePromises);
+    const combinedOverlays = allSlicesOverlays.flat();
+
+    const deduped = deduplicateOverlays(combinedOverlays);
+    console.log(`[Gemini] Slices translation complete. Combined=${combinedOverlays.length}, Deduped=${deduped.length}`);
+    return deduped;
+  }
+
+  // Process standard images in one go
+  return translateSingleImageWithGemini(
+    imageBuffer,
+    mimeType,
+    imageWidth,
+    imageHeight,
+    apiKey
+  );
+}
+
+async function translateSingleImageWithGemini(
+  imageBuffer: Buffer,
+  mimeType: string,
+  imageWidth: number,
+  imageHeight: number,
+  apiKey: string
+): Promise<TextOverlay[] | null> {
   try {
     const genAI = new GoogleGenerativeAI(apiKey);
     const model = genAI.getGenerativeModel({ model: 'gemini-3.1-flash-lite' });
     const base64Image = imageBuffer.toString('base64');
 
-    const prompt = `Analyze this manga/manhwa page. Detect all speech bubbles, narrator boxes, and text blocks.
-For each text block, extract the original text, translate it to natural manga-style Arabic, and return its bounding box.
-Coordinates in the bounding box must be normalized on a 0-1000 scale: ymin, xmin, ymax, xmax relative to the image height and width.
+    const prompt = `You are a manga/manhwa translator. Analyze this page image and find every speech bubble, narrator box, and text block.
 
-Guidelines:
-- Include all dialogue and narration bubbles.
-- Exclude scanlation credits, translator notes, website watermarks (e.g. readfirst at, mangacultivator, etc.), and sound effects (SFX) that are part of the art background unless they contain crucial plot dialogue.
-- Make the Arabic translation natural, fluent, and highly context-aware.`;
+For each one:
+1. Extract the original text exactly as written.
+2. Translate it into natural, fluent manga-style Arabic.
+3. Return the bounding box of the INNER AREA of the speech bubble or narrator box (just inside the outer outlines/borders).
+
+Bounding box format: ymin, xmin, ymax, xmax — normalized to a 0–1000 scale relative to image height and width.
+
+IMPORTANT — bounding box accuracy:
+- The bbox MUST cover the inside region of the speech bubble or narrator box where the text resides, but stay strictly INSIDE the black outlines/borders. I will use this bbox to place an opaque background rectangle to mask the original English text and render the Arabic translation centered inside it.
+- Do NOT include the black outer outlines/borders of the speech bubbles in the bbox (so we don't cover or overwrite them).
+- ymin = top edge of the inside bubble region, ymax = bottom edge of the inside bubble region.
+- xmin = left edge of the inside bubble region, xmax = right edge of the inside bubble region.
+
+What to include:
+- All dialogue, narration, and thought bubbles.
+
+What to exclude:
+- Scanlation credits, translator notes, watermarks (e.g. "read first at", "mangacultivator"), and purely decorative SFX.`;
 
     let response: any;
     let retries = 3;
-    let delay = 500; // 500ms initial wait to stay within Vercel's strict 10s timeout
+    let delay = 500;
 
     while (retries > 0) {
       try {
@@ -122,7 +216,7 @@ Guidelines:
             },
           },
         });
-        break; // Success
+        break;
       } catch (err: any) {
         console.error(`[Gemini] API attempt failed. Retries left: ${retries - 1}. Error: ${err.message || err}`);
         retries--;
@@ -148,9 +242,6 @@ Guidelines:
       throw new Error('Invalid JSON structure returned by Gemini');
     }
 
-    console.log(`[Gemini] Vision API returned ${result.bubbles.length} bubbles.`);
-
-    // Convert 0-1000 normalized coordinates back to pixel coordinates
     return result.bubbles.map((b) => {
       const x = (b.bbox.xmin / 1000) * imageWidth;
       const y = (b.bbox.ymin / 1000) * imageHeight;
@@ -166,11 +257,49 @@ Guidelines:
           width: Math.round(width),
           height: Math.round(height),
         } as BoundingBox,
-        confidence: 100, // Gemini translations are treated with full confidence
+        confidence: 100,
       };
     });
   } catch (error) {
-    console.error('[Gemini] Translation failed:', error);
+    console.error('[Gemini] Vision call failed:', error);
     throw error;
   }
+}
+
+function deduplicateOverlays(overlays: TextOverlay[]): TextOverlay[] {
+  const result: TextOverlay[] = [];
+
+  for (const item of overlays) {
+    let isDuplicate = false;
+    for (let i = 0; i < result.length; i++) {
+      const existing = result[i];
+      if (boxesOverlapPercent(item.bbox, existing.bbox) > 0.6) {
+        isDuplicate = true;
+        // Keep the one with longer translation (usually more complete/correct)
+        if (item.translatedText.length > existing.translatedText.length) {
+          result[i] = item;
+        }
+        break;
+      }
+    }
+    if (!isDuplicate) {
+      result.push(item);
+    }
+  }
+
+  return result;
+}
+
+function boxesOverlapPercent(a: BoundingBox, b: BoundingBox): number {
+  const xOverlap = Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x));
+  const yOverlap = Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
+  const overlapArea = xOverlap * yOverlap;
+
+  if (overlapArea <= 0) return 0;
+
+  const aArea = a.width * a.height;
+  const bArea = b.width * b.height;
+  const minArea = Math.min(aArea, bArea);
+
+  return overlapArea / minArea;
 }

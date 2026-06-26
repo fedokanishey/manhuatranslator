@@ -162,6 +162,8 @@ async function processImageContent(
       }
     }
 
+    // Rely on Gemini Vision bounding boxes directly for layout positioning
+
     // Fallback to local Tesseract OCR + Google Translate
     if (overlays.length === 0) {
       if (process.env.VERCEL === '1') {
@@ -317,6 +319,8 @@ export async function processSinglePage(
     }
   }
 
+  // Rely on Gemini Vision bounding boxes directly for layout positioning
+
   // Fallback to Tesseract OCR + Google Translate
   if (overlays.length === 0) {
     if (process.env.VERCEL === '1') {
@@ -357,4 +361,5 @@ export async function processSinglePage(
 
   return resultPage;
 }
+// Bbox refinement helper removed to rely fully on Gemini's native bounding box coordinates.
 

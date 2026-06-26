@@ -69,11 +69,12 @@ export function TranslationViewer({ result, onReset }: TranslationViewerProps) {
       {/* Image Content */}
       {result.pages && result.pages.length > 0 && (
         <div className="manga-reader">
-          {result.pages.map((page) => (
+          {result.pages.map((page, idx) => (
             <div 
-              key={page.pageIndex} 
-              className="manga-page relative min-h-[300px] flex flex-col items-center justify-center bg-secondary/10 rounded-xl my-6 border border-border/10 overflow-hidden"
-              style={{ aspectRatio: page.width && page.height ? `${page.width}/${page.height}` : 'auto' }}
+              key={`page-${idx}-${page.pageIndex}`} 
+              className={`manga-page relative bg-secondary/10 rounded-xl my-6 border border-border/10 overflow-hidden ${
+                page.loading || page.error ? 'min-h-[300px] flex flex-col items-center justify-center' : ''
+              }`}
             >
               {page.loading ? (
                 <div className="flex flex-col items-center justify-center p-8 text-center space-y-4">
@@ -99,21 +100,24 @@ export function TranslationViewer({ result, onReset }: TranslationViewerProps) {
                 </div>
               ) : (
                 <>
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={page.imageBase64}
-                    alt={`Page ${page.pageIndex + 1}`}
-                    width={page.width}
-                    height={page.height}
-                    loading="lazy"
-                  />
-                  {showOverlays && page.overlays.length > 0 && (
-                    <ImageOverlay
-                      overlays={page.overlays}
-                      imageWidth={page.width}
-                      imageHeight={page.height}
+                  <div className="relative w-full">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={page.imageBase64}
+                      alt={`Page ${page.pageIndex + 1}`}
+                      width={page.width}
+                      height={page.height}
+                      loading="lazy"
                     />
-                  )}
+                    {showOverlays && page.overlays.length > 0 && (
+                      <ImageOverlay
+                        overlays={page.overlays}
+                        imageWidth={page.width}
+                        imageHeight={page.height}
+                        imageBase64={page.imageBase64}
+                      />
+                    )}
+                  </div>
                 </>
               )}
             </div>

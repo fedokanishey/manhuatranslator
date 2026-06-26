@@ -143,10 +143,13 @@ export function useTranslation(): UseTranslationReturn {
             setResult((prevResult) => {
               if (!prevResult || !prevResult.pages) return prevResult;
               const updatedPages = [...prevResult.pages];
-              updatedPages[img.index] = {
-                ...translatedPage,
-                loading: false,
-              };
+              const pageIdx = updatedPages.findIndex((p) => p && p.pageIndex === img.index);
+              if (pageIdx !== -1) {
+                updatedPages[pageIdx] = {
+                  ...translatedPage,
+                  loading: false,
+                };
+              }
               return {
                 ...prevResult,
                 pages: updatedPages,
@@ -157,11 +160,14 @@ export function useTranslation(): UseTranslationReturn {
             setResult((prevResult) => {
               if (!prevResult || !prevResult.pages) return prevResult;
               const updatedPages = [...prevResult.pages];
-              updatedPages[img.index] = {
-                ...updatedPages[img.index],
-                loading: false,
-                error: pageErr instanceof Error ? pageErr.message : 'Translation failed',
-              } as any;
+              const pageIdx = updatedPages.findIndex((p) => p && p.pageIndex === img.index);
+              if (pageIdx !== -1) {
+                updatedPages[pageIdx] = {
+                  ...updatedPages[pageIdx],
+                  loading: false,
+                  error: pageErr instanceof Error ? pageErr.message : 'Translation failed',
+                } as any;
+              }
               return {
                 ...prevResult,
                 pages: updatedPages,
