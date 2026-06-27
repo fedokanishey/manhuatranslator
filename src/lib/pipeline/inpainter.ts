@@ -1,6 +1,7 @@
-import sharp from 'sharp';
+import sharp, { OverlayOptions } from 'sharp';
 import type { TextOverlay, BoundingBox, InpaintedRegion, BubbleShape } from '@/types/translation';
 import { TRANSLATABLE_TEXT_TYPES } from '@/types/translation';
+
 
 /**
  * Inpainting Engine
@@ -43,8 +44,9 @@ export async function inpaintImage(
   const fillInfos = await sampleFillColors(imageBuffer, toInpaint, imageWidth, imageHeight);
 
   // Build composite overlays (SVG-based fills)
-  const compositeInputs: sharp.OverlayOptions[] = [];
+  const compositeInputs: OverlayOptions[] = [];
   const regions: InpaintedRegion[] = [];
+
 
   for (let i = 0; i < toInpaint.length; i++) {
     const overlay = toInpaint[i];

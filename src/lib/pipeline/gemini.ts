@@ -60,6 +60,13 @@ export const GEMINI_MODELS = [
   'gemini-3.1-flash-lite'
 ];
 
+export const OPENROUTER_MODELS = [
+  'google/gemini-2.5-flash',
+  'google/gemini-2.5-pro',
+  'openrouter/free'
+];
+
+
 let lastActiveGeminiModelIndex = 0;
 let lastActiveOpenRouterModelIndex = 0;
 
@@ -158,11 +165,7 @@ export function getOpenRouterKey(): string | undefined {
   return undefined;
 }
 
-export const OPENROUTER_MODELS = [
-  'google/gemini-2.5-flash',
-  'google/gemini-2.5-pro',
-  'openrouter/free'
-];
+
 
 export async function tryOpenRouterModels(
   apiKey: string,

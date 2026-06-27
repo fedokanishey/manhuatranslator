@@ -134,8 +134,9 @@ async function extractImagesFromZip(
           const writer = ds.writable.getWriter();
           const reader = ds.readable.getReader();
 
-          writer.write(compressedData);
+          writer.write(new Uint8Array(compressedData));
           writer.close();
+
 
           const chunks: Uint8Array[] = [];
           let done = false;

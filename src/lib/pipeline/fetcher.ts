@@ -153,10 +153,12 @@ async function fetchWithPlaywright(url: string): Promise<FetchResult> {
 
   let playwright: any;
   try {
-    playwright = await import('playwright');
+    const importPlaywright = new Function("return import('playwright')");
+    playwright = await importPlaywright();
   } catch {
     throw new Error('Playwright is not installed. Install with: npm install playwright');
   }
+
 
   const browser = await playwright.chromium.launch({
     headless: true,

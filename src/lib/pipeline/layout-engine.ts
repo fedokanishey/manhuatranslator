@@ -1,4 +1,5 @@
-import type { BoundingBox, LayoutResult, BubbleShape } from '@/types/translation';
+import type { BoundingBox, LayoutResult, BubbleShape, TextOverlay } from '@/types/translation';
+
 import {
   MAX_FONT_SIZE_PX,
   MIN_FONT_SIZE_PX,
