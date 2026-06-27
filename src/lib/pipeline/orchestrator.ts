@@ -1,18 +1,26 @@
-import { fetchPage } from './fetcher';
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars */
+import { fetchWithFallback, fetchPage } from './fetcher';
+
 import { parseHtml } from './parser';
 import { processImage, processImages } from './image-processor';
 import { runOCR } from './ocr';
 import { translateImageWithGemini } from './gemini';
 import { translateBatch, translateHtmlContent } from './translator';
+import { inpaintImage } from './inpainter';
+import { computePageLayouts } from './layout-engine';
 import { getCached, setCache } from '../cache';
-import type {
-  TranslationResult,
-  TranslatedPage,
-  TextOverlay,
-  TranslationProgress,
+import {
+  TRANSLATABLE_TEXT_TYPES,
+  SKIP_TEXT_TYPES,
+  type TextOverlay,
+  type TranslationResult,
+  type TranslatedPage,
+  type TranslationProgress,
 } from '@/types/translation';
 
 type ProgressCallback = (progress: TranslationProgress) => void;
+
+// ── Main Pipeline ────────────────────────────────────────────────────
 
 export async function runTranslationPipeline(
   url: string,
@@ -30,14 +38,30 @@ export async function runTranslationPipeline(
   }
 
   try {
-    // Step 1: Fetch page
+    // Step 1: Fetch page with fallback strategies
     onProgress?.({ stage: 'fetching', progress: 10, message: 'Fetching chapter page...' });
-    const fetchResult = await fetchPage(url);
-    console.log('[Pipeline] Fetched page, HTML length:', fetchResult.html.length);
+    const fetchResult = await fetchWithFallback(url);
+
+    // If all fetch strategies failed, return structured error
+    if (!fetchResult.result) {
+      return {
+        success: false,
+        title: 'Access Blocked',
+        sourceUrl: url,
+        contentType: 'text',
+        cached: false,
+        processedAt: new Date().toISOString(),
+        processingTimeMs: Date.now() - startTime,
+        error: fetchResult.error?.message || 'Failed to access the website',
+        fetchError: fetchResult.error,
+      };
+    }
+
+    console.log(`[Pipeline] Fetched page via ${fetchResult.strategy}, HTML length:`, fetchResult.result.html.length);
 
     // Step 2: Parse HTML
     onProgress?.({ stage: 'parsing', progress: 20, message: 'Analyzing page structure...' });
-    const parsed = parseHtml(fetchResult.html, fetchResult.finalUrl);
+    const parsed = parseHtml(fetchResult.result.html, fetchResult.result.finalUrl);
     console.log('[Pipeline] Parsed:', { contentType: parsed.contentType, images: parsed.images.length, textBlocks: parsed.textBlocks.length });
 
     // Step 3: Process based on content type
@@ -108,6 +132,8 @@ export async function runTranslationPipeline(
   }
 }
 
+// ── Image Content Pipeline ───────────────────────────────────────────
+
 async function processImageContent(
   parsed: ReturnType<typeof parseHtml>,
   targetLang: string,
@@ -123,11 +149,9 @@ async function processImageContent(
     throw new Error('No images could be processed from this chapter');
   }
 
-  // Determine source languages for OCR based on page content/metadata language
   const ocrLangs = detectSourceLanguages(parsed.textBlocks, parsed.title);
   console.log(`[Pipeline] Detected source language(s) for OCR:`, ocrLangs);
 
-  // Run OCR on all images
   onProgress?.({ stage: 'running-ocr', progress: 50, message: 'Running text recognition (OCR)...' });
   const pages: TranslatedPage[] = [];
 
@@ -140,72 +164,19 @@ async function processImageContent(
       message: `OCR: Image ${i + 1}/${processedImages.length}`,
     });
 
-    let overlays: TextOverlay[] = [];
-    let geminiError: any = null;
+    const page = await processPagePipeline(
+      img.buffer,
+      img.mimeType,
+      img.width,
+      img.height,
+      img.originalSrc,
+      i,
+      ocrLangs,
+      targetLang,
+      onProgress
+    );
 
-    // Try Gemini Vision OCR + Translation first
-    if (process.env.GEMINI_API_KEY) {
-      console.log(`[Pipeline] Using Gemini Vision for image ${i}...`);
-      try {
-        const geminiResult = await translateImageWithGemini(
-          img.buffer,
-          img.mimeType,
-          img.width,
-          img.height
-        );
-        if (geminiResult) {
-          overlays = geminiResult;
-        }
-      } catch (err) {
-        console.error(`[Pipeline] Gemini failed for image ${i}:`, err);
-        geminiError = err;
-      }
-    }
-
-    // Rely on Gemini Vision bounding boxes directly for layout positioning
-
-    // Fallback to local Tesseract OCR + Google Translate
-    if (overlays.length === 0) {
-      if (process.env.VERCEL === '1') {
-        throw new Error(`Gemini: ${geminiError?.message || 'Key missing'}`);
-      }
-      console.log(`[Pipeline] Running Tesseract OCR for image ${i}...`);
-      const ocrResult = await runOCR(img.buffer, ocrLangs);
-      console.log(`[Pipeline] OCR image ${i}: words=${ocrResult.words.length}, text="${ocrResult.fullText.slice(0, 100)}", confidence=${ocrResult.averageConfidence.toFixed(1)}`);
-
-      if (ocrResult.words.length > 0) {
-        const translationInputs = ocrResult.words.map((word, idx) => ({
-          text: word.text,
-          id: `img-${i}-word-${idx}`,
-        }));
-
-        onProgress?.({
-          stage: 'translating',
-          progress: 70 + (i / processedImages.length) * 20,
-          message: `Translating: Image ${i + 1}/${processedImages.length}`,
-        });
-
-        const translations = await translateBatch(translationInputs, targetLang);
-        console.log(`[Pipeline] Translated ${translations.length} words for image ${i}:`, translations.map(t => `"${t.original}" -> "${t.translated}"`));
-
-        overlays = ocrResult.words.map((word, idx) => ({
-          originalText: word.text,
-          translatedText: translations[idx]?.translated || word.text,
-          bbox: word.bbox,
-          confidence: word.confidence,
-        }));
-      }
-    }
-    console.log(`[Pipeline] Image ${i}: ${overlays.length} overlays created`);
-
-    pages.push({
-      pageIndex: i,
-      imageUrl: img.originalSrc,
-      imageBase64: img.base64,
-      width: img.width,
-      height: img.height,
-      overlays,
-    });
+    pages.push(page);
   }
 
   // Also translate text blocks if mixed content
@@ -227,6 +198,184 @@ async function processImageContent(
     processingTimeMs: Date.now() - startTime,
   };
 }
+
+// ── Single Page Pipeline ─────────────────────────────────────────────
+// New pipeline:
+//   Image → Gemini (Bubble Detection + OCR + Translation + Classification)
+//   → Filter (translatable types only)
+//   → Layout Engine (compute font sizes, line breaks)
+//   → Inpainting (remove original text)
+//   → Return inpainted image + overlay layout data
+
+async function processPagePipeline(
+  imageBuffer: Buffer,
+  mimeType: string,
+  imageWidth: number,
+  imageHeight: number,
+  imageUrl: string,
+  pageIndex: number,
+  ocrLangs: string[],
+  targetLang: string,
+  onProgress?: ProgressCallback
+): Promise<TranslatedPage> {
+  let overlays: TextOverlay[] = [];
+  let geminiSuccess = false;
+  let geminiError: any = null;
+
+
+  // Step 1: Gemini Vision (OCR + Translation + Classification)
+  if (process.env.GEMINI_API_KEY || process.env.OPENROUTER_API_KEY) {
+    console.log(`[Pipeline] Using Gemini Vision for page ${pageIndex}...`);
+    try {
+      const geminiResult = await translateImageWithGemini(
+        imageBuffer,
+        mimeType,
+        imageWidth,
+        imageHeight
+      );
+      if (geminiResult) {
+        overlays = geminiResult;
+        geminiSuccess = true;
+      }
+    } catch (err) {
+      console.error(`[Pipeline] Gemini failed for page ${pageIndex}:`, err);
+      geminiError = err;
+    }
+  }
+
+  // Fallback: Tesseract OCR + Google Translate
+  // Only run fallback if Gemini was not successful (e.g. API error or disabled)
+  if (!geminiSuccess) {
+    if (process.env.VERCEL === '1') {
+      throw new Error(`Gemini: ${geminiError?.message || 'Key missing'}`);
+    }
+    console.log(`[Pipeline] Running Tesseract OCR fallback for page ${pageIndex}...`);
+    try {
+      const ocrResult = await runOCR(imageBuffer, ocrLangs);
+      console.log(`[Pipeline] OCR page ${pageIndex}: words=${ocrResult.words.length}, confidence=${ocrResult.averageConfidence.toFixed(1)}`);
+
+      if (ocrResult.words.length > 0) {
+        const translationInputs = ocrResult.words.map((word, idx) => ({
+          text: word.text,
+          id: `img-${pageIndex}-word-${idx}`,
+        }));
+
+        const translations = await translateBatch(translationInputs, targetLang);
+        overlays = ocrResult.words.map((word, idx) => ({
+          originalText: word.text,
+          translatedText: translations[idx]?.translated || word.text,
+          bbox: word.bbox,
+          confidence: word.confidence,
+          textType: word.textType,
+          isVertical: word.isVertical,
+        }));
+      }
+    } catch (ocrErr) {
+      console.error(`[Pipeline] OCR fallback failed for page ${pageIndex}:`, ocrErr);
+      // Do not throw, keep overlays empty and return the original image
+    }
+  }
+
+
+  // Step 2: Filter — keep only translatable types
+  const translatableOverlays = overlays.filter((o) => {
+    if (!o.textType) return true; // No classification = treat as translatable
+    if (SKIP_TEXT_TYPES.includes(o.textType)) {
+      console.log(`[Pipeline] Skipping ${o.textType}: "${o.originalText.slice(0, 30)}"`);
+      return false;
+    }
+    return true;
+  });
+
+  console.log(`[Pipeline] Page ${pageIndex}: ${overlays.length} total overlays, ${translatableOverlays.length} translatable`);
+
+  // Step 3: Layout Engine — compute font sizes and line breaks
+  const layoutOverlays = computePageLayouts(translatableOverlays);
+
+  // Step 4: Inpainting — remove original text from image
+  const inpaintResult = await inpaintImage(
+    imageBuffer,
+    translatableOverlays,
+    imageWidth,
+    imageHeight
+  );
+
+  return {
+    pageIndex,
+    imageUrl,
+    imageBase64: inpaintResult.base64,
+    width: imageWidth,
+    height: imageHeight,
+    overlays: layoutOverlays,
+    inpaintedRegions: inpaintResult.regions,
+  };
+}
+
+// ── Public: Single Page Translation ──────────────────────────────────
+
+export async function processSinglePage(
+  imageUrl: string,
+  index: number,
+  targetLang: string = 'ar',
+  langs?: string[],
+  imageBase64?: string
+): Promise<TranslatedPage> {
+  const cacheKey = `page::${imageUrl}::${targetLang}`;
+
+  // Check page-level cache
+  const cached = getCached<TranslatedPage>(cacheKey);
+  if (cached) {
+    console.log(`[Pipeline] Page ${index} cache hit.`);
+    return cached;
+  }
+
+  let imgBuffer: Buffer;
+  let imgWidth: number;
+  let imgHeight: number;
+  let mimeType: string;
+
+  if (imageBase64) {
+    // Handle uploaded images (base64 data)
+    const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, '');
+    imgBuffer = Buffer.from(base64Data, 'base64');
+    const sharp = (await import('sharp')).default;
+    const metadata = await sharp(imgBuffer).metadata();
+    imgWidth = metadata.width || 0;
+    imgHeight = metadata.height || 0;
+    mimeType = 'image/png';
+  } else {
+    // Download from URL
+    const img = await processImage(imageUrl, index);
+    imgBuffer = img.buffer;
+    imgWidth = img.width;
+    imgHeight = img.height;
+    mimeType = img.mimeType;
+  }
+
+  const ocrLangs = langs && langs.length > 0 ? langs : ['eng'];
+
+  const resultPage = await processPagePipeline(
+    imgBuffer,
+    mimeType,
+    imgWidth,
+    imgHeight,
+    imageUrl,
+    index,
+    ocrLangs,
+    targetLang
+  );
+
+  if (imageBase64) {
+    resultPage.originalBase64 = imageBase64;
+  }
+
+  // Cache the page-level translation
+  setCache(cacheKey, resultPage);
+
+  return resultPage;
+}
+
+// ── Text Content Pipeline ────────────────────────────────────────────
 
 async function processTextContent(
   parsed: ReturnType<typeof parseHtml>,
@@ -254,112 +403,25 @@ async function processTextContent(
   };
 }
 
+// ── Language Detection ───────────────────────────────────────────────
+
 function detectSourceLanguages(
   textBlocks: Array<{ text: string }>,
   title: string
 ): string[] {
   const sampleText = (title + ' ' + textBlocks.map((b) => b.text).join(' ')).toLowerCase();
 
-  // Check for Korean Hangul (U+AC00 to U+D7AF)
   if (/[\uac00-\ud7af]/.test(sampleText)) {
     return ['kor', 'eng'];
   }
 
-  // Check for Japanese Hiragana/Katakana (U+3040 to U+30FF)
   if (/[\u3040-\u309f\u30a0-\u30ff]/.test(sampleText)) {
     return ['jpn', 'eng'];
   }
 
-  // Check for Chinese (Han ideographs)
   if (/[\u4e00-\u9faf]/.test(sampleText)) {
     return ['chi_sim', 'eng'];
   }
 
-  // Default to English only (dramatically increases accuracy and speed for scanlated manga)
   return ['eng'];
 }
-
-export async function processSinglePage(
-  imageUrl: string,
-  index: number,
-  targetLang: string = 'ar',
-  langs?: string[]
-): Promise<TranslatedPage> {
-  const cacheKey = `page::${imageUrl}::${targetLang}`;
-
-  // Check page-level cache
-  const cached = getCached<TranslatedPage>(cacheKey);
-  if (cached) {
-    console.log(`[Pipeline] Page ${index} cache hit.`);
-    return cached;
-  }
-
-  // 1. Process image (download and resize/sharp)
-  const img = await processImage(imageUrl, index);
-  
-  let overlays: TextOverlay[] = [];
-  let geminiError: any = null;
-
-  // Try Gemini Vision OCR + Translation first
-  if (process.env.GEMINI_API_KEY) {
-    console.log(`[Pipeline] Using Gemini Vision for page ${index}...`);
-    try {
-      const geminiResult = await translateImageWithGemini(
-        img.buffer,
-        img.mimeType,
-        img.width,
-        img.height
-      );
-      if (geminiResult) {
-        overlays = geminiResult;
-      }
-    } catch (err) {
-      console.error(`[Pipeline] Gemini failed for page ${index}:`, err);
-      geminiError = err;
-    }
-  }
-
-  // Rely on Gemini Vision bounding boxes directly for layout positioning
-
-  // Fallback to Tesseract OCR + Google Translate
-  if (overlays.length === 0) {
-    if (process.env.VERCEL === '1') {
-      throw new Error(`Gemini: ${geminiError?.message || 'Key missing'}`);
-    }
-    console.log(`[Pipeline] Running Tesseract OCR fallback for page ${index}...`);
-    const ocrLangs = langs && langs.length > 0 ? langs : ['eng'];
-    const ocrResult = await runOCR(img.buffer, ocrLangs);
-    console.log(`[Pipeline] OCR page ${index}: words=${ocrResult.words.length}, confidence=${ocrResult.averageConfidence.toFixed(1)}`);
-
-    if (ocrResult.words.length > 0) {
-      const translationInputs = ocrResult.words.map((word, idx) => ({
-        text: word.text,
-        id: `img-${index}-word-${idx}`,
-      }));
-
-      const translations = await translateBatch(translationInputs, targetLang);
-      overlays = ocrResult.words.map((word, idx) => ({
-        originalText: word.text,
-        translatedText: translations[idx]?.translated || word.text,
-        bbox: word.bbox,
-        confidence: word.confidence,
-      }));
-    }
-  }
-
-  const resultPage: TranslatedPage = {
-    pageIndex: index,
-    imageUrl: img.originalSrc,
-    imageBase64: img.base64,
-    width: img.width,
-    height: img.height,
-    overlays,
-  };
-
-  // Cache the page-level translation
-  setCache(cacheKey, resultPage);
-
-  return resultPage;
-}
-// Bbox refinement helper removed to rely fully on Gemini's native bounding box coordinates.
-

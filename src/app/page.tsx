@@ -9,7 +9,7 @@ import { FEATURES, APP_NAME } from '@/lib/constants';
 import { Badge } from '@/components/ui/badge';
 
 export default function HomePage() {
-  const { result, isLoading, error, progress, statusMessage, translate, reset } = useTranslation();
+  const { result, isLoading, error, fetchError, progress, statusMessage, translate, translateFromUpload, reset } = useTranslation();
 
   // Show translation result
   if (result) {
@@ -61,14 +61,33 @@ export default function HomePage() {
             {/* Subtitle */}
             <p className="text-lg sm:text-xl text-muted-foreground max-w-2xl mx-auto mb-10 leading-relaxed">
               Paste any manga, manhwa, or webtoon chapter URL and get an instant Arabic translation.
-              {APP_NAME} uses OCR and AI to detect text in images and translate it automatically.
+              {' '}{APP_NAME} uses AI to detect text, remove it cleanly, and render Arabic inside bubbles.
             </p>
 
-            {/* URL Input */}
-            <UrlInput onSubmit={translate} isLoading={isLoading} />
+            {/* URL Input + Upload */}
+            <UrlInput onSubmit={translate} onUpload={translateFromUpload} isLoading={isLoading} />
 
-            {/* Error display */}
-            {error && (
+            {/* Fetch Error (anti-bot, Cloudflare, etc.) */}
+            {fetchError && (
+              <div className="mt-4 mx-auto max-w-2xl rounded-xl border border-amber-500/30 bg-amber-500/10 p-5" id="fetch-error">
+                <div className="flex items-start gap-3 text-left">
+                  <div className="rounded-full bg-amber-500/20 p-2 text-amber-400 shrink-0 mt-0.5">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                      <line x1="12" y1="9" x2="12" y2="13" />
+                      <line x1="12" y1="17" x2="12.01" y2="17" />
+                    </svg>
+                  </div>
+                  <div>
+                    <p className="text-sm font-medium text-amber-300">{fetchError.message}</p>
+                    <p className="text-xs text-amber-400/70 mt-1">{fetchError.suggestion}</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Generic error display */}
+            {error && !fetchError && (
               <div className="mt-4 mx-auto max-w-2xl rounded-xl border border-destructive/30 bg-destructive/10 p-4" id="translation-error">
                 <p className="text-sm text-destructive flex items-center gap-2 justify-center">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -84,7 +103,7 @@ export default function HomePage() {
             {/* Supported formats hint */}
             <div className="mt-6 flex items-center justify-center gap-3 flex-wrap">
               <span className="text-xs text-muted-foreground/50">Supports:</span>
-              {['Manga', 'Manhwa', 'Webtoon', 'Light Novels'].map((type) => (
+              {['Manga', 'Manhwa', 'Webtoon', 'Image Upload', 'ZIP Archive'].map((type) => (
                 <span
                   key={type}
                   className="text-xs text-muted-foreground/40 bg-secondary/30 rounded-full px-3 py-1"
@@ -113,18 +132,18 @@ export default function HomePage() {
             {[
               {
                 step: '01',
-                title: 'Paste URL',
-                desc: 'Copy the chapter URL from your favorite manga site',
+                title: 'Paste URL or Upload',
+                desc: 'Paste a chapter URL or upload images directly',
               },
               {
                 step: '02',
                 title: 'AI Processing',
-                desc: 'OCR detects text in images, then AI translates it to Arabic',
+                desc: 'Bubbles detected, text removed, Arabic rendered inside',
               },
               {
                 step: '03',
                 title: 'Read & Enjoy',
-                desc: 'View the translated chapter with Arabic text overlays',
+                desc: 'Professional-quality Arabic text perfectly fitted in bubbles',
               },
             ].map((item, idx) => (
               <div key={idx} className="text-center group">
@@ -173,7 +192,7 @@ export default function HomePage() {
               Ready to Start Reading?
             </h2>
             <p className="text-muted-foreground mb-8">
-              Paste a chapter URL above and get your first translation in seconds. No sign-up required.
+              Paste a chapter URL or upload images above to get your first translation in seconds. No sign-up required.
             </p>
             <button
               onClick={() => {

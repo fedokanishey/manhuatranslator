@@ -1,18 +1,41 @@
-import type { OCRResult, OCRWord, BoundingBox } from '@/types/translation';
-import { MIN_OCR_CONFIDENCE } from '../constants';
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars */
+import type { OCRResult, OCRWord, BoundingBox, TextType } from '@/types/translation';
+import { MIN_OCR_CONFIDENCE, VERTICAL_TEXT_RATIO_THRESHOLD } from '../constants';
 
-export async function runOCR(imageBuffer: Buffer, langs: string[] = ['eng', 'jpn', 'kor', 'chi_sim']): Promise<OCRResult> {
+// Global cache to reuse Tesseract workers across requests (saves WASM boot and traineddata load times)
+const globalWorkers = new Map<string, any>();
+
+async function getOrCreateWorker(langs: string[]): Promise<any> {
   const { createWorker, OEM, PSM } = await import('tesseract.js');
+  const key = [...langs].sort().join(',');
+  
+  if (globalWorkers.has(key)) {
+    console.log(`[OCR] Reusing cached Tesseract worker for: ${key}`);
+    return globalWorkers.get(key);
+  }
+
+  console.log(`[OCR] Initializing new Tesseract worker for: ${key}`);
   const worker = await createWorker(langs, OEM.DEFAULT, {
+    langPath: process.cwd(),
+    cachePath: process.cwd(),
     logger: () => {},
   });
 
-  try {
-    await worker.setParameters({
-      tessedit_pageseg_mode: PSM.AUTO,
-    });
+  await worker.setParameters({
+    tessedit_pageseg_mode: PSM.AUTO,
+  });
 
+  globalWorkers.set(key, worker);
+  return worker;
+}
+
+export async function runOCR(imageBuffer: Buffer, langs: string[] = ['eng', 'jpn', 'kor', 'chi_sim']): Promise<OCRResult> {
+  const worker = await getOrCreateWorker(langs);
+
+  try {
+    // Recognize text (blocks option returns structured geometry)
     const { data } = await worker.recognize(imageBuffer, {}, { blocks: true });
+
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const dataAny = data as any;
@@ -31,15 +54,21 @@ export async function runOCR(imageBuffer: Buffer, langs: string[] = ['eng', 'jpn
           for (const para of block.paragraphs) {
             const cleanedText = cleanOCRText(para.text);
             if (cleanedText.length > 0 && para.confidence >= MIN_OCR_CONFIDENCE) {
+              const bbox: BoundingBox = {
+                x: para.bbox.x0,
+                y: para.bbox.y0,
+                width: para.bbox.x1 - para.bbox.x0,
+                height: para.bbox.y1 - para.bbox.y0,
+              };
+              const isVertical = detectVerticalText(bbox);
+              const textType = classifyTextHeuristic(cleanedText, bbox, data.blocks?.length || 1);
+
               blockParagraphs.push({
                 text: cleanedText,
                 confidence: para.confidence,
-                bbox: {
-                  x: para.bbox.x0,
-                  y: para.bbox.y0,
-                  width: para.bbox.x1 - para.bbox.x0,
-                  height: para.bbox.y1 - para.bbox.y0,
-                } as BoundingBox,
+                bbox,
+                isVertical,
+                textType,
               });
             }
           }
@@ -52,7 +81,6 @@ export async function runOCR(imageBuffer: Buffer, langs: string[] = ['eng', 'jpn
     if (dataAny.lines && dataAny.lines.length > 0) {
       rawLines = dataAny.lines;
     } else if (dataAny.words && dataAny.words.length > 0) {
-      // Rebuild lines from words using proximity grouping if lines is empty
       const filteredWords: OCRWord[] = dataAny.words
         .map((w: any) => ({
           text: cleanOCRText(w.text),
@@ -78,16 +106,20 @@ export async function runOCR(imageBuffer: Buffer, langs: string[] = ['eng', 'jpn
     }
 
     const filteredLines: OCRWord[] = rawLines
-      .map((l) => ({
-        text: cleanOCRText(l.text),
-        confidence: l.confidence,
-        bbox: {
+      .map((l) => {
+        const bbox: BoundingBox = {
           x: l.bbox.x0,
           y: l.bbox.y0,
           width: l.bbox.x1 - l.bbox.x0,
           height: l.bbox.y1 - l.bbox.y0,
-        } as BoundingBox,
-      }))
+        };
+        return {
+          text: cleanOCRText(l.text),
+          confidence: l.confidence,
+          bbox,
+          isVertical: detectVerticalText(bbox),
+        };
+      })
       .filter((l) => l.text.length > 0 && l.confidence >= MIN_OCR_CONFIDENCE);
 
     const customParagraphs = groupLinesIntoParagraphs(filteredLines);
@@ -100,6 +132,8 @@ export async function runOCR(imageBuffer: Buffer, langs: string[] = ['eng', 'jpn
       );
       if (isMissed) {
         console.log('[OCR] Recovered missed text bubble:', customPara.text);
+        // Classify recovered text
+        customPara.textType = classifyTextHeuristic(customPara.text, customPara.bbox, words.length + 1);
         words.push(customPara);
       }
     }
@@ -117,60 +151,112 @@ export async function runOCR(imageBuffer: Buffer, langs: string[] = ['eng', 'jpn
       averageConfidence,
       language: detectedScript,
     };
-  } finally {
-    await worker.terminate();
+  } catch (error) {
+    throw error;
   }
 }
+
+
+// ── Vertical Text Detection ──────────────────────────────────────────
+
+function detectVerticalText(bbox: BoundingBox): boolean {
+  if (bbox.width <= 0) return false;
+  return (bbox.height / bbox.width) > VERTICAL_TEXT_RATIO_THRESHOLD;
+}
+
+// ── Text Classification Heuristics ───────────────────────────────────
+
+const SFX_PATTERNS = [
+  /^[A-Z!?]{1,6}$/,           // Short all-caps like "BAM!", "CRASH"
+  /^(boom|bang|crash|pow|wham|slash|thud|clang|woosh|swoosh|crack|snap|rumble|thump|shatter|clatter)$/i,
+  /^[ドゴバガザダ]{1,8}$/,      // Japanese SFX kana
+  /^[ㄱ-ㅎ가-힣]{1,4}$/,       // Short Korean SFX
+];
+
+const WATERMARK_PATTERNS = [
+  /read\s*first\s*at/gi,
+  /read\s*first\s*on/gi,
+  /mangacultivator/gi,
+  /anshscans/gi,
+  /dsc\.gg/gi,
+  /patreon\.com/gi,
+  /discord/gi,
+  /\.com\/?$/gi,
+  /\.net\/?$/gi,
+  /\.org\/?$/gi,
+  /https?:\/\//gi,
+  /translated\s*by/gi,
+  /scan(?:lation|s)\s/gi,
+];
+
+function classifyTextHeuristic(text: string, bbox: BoundingBox, totalBlocks: number): TextType {
+  // Check watermark patterns
+  for (const pattern of WATERMARK_PATTERNS) {
+    if (pattern.test(text)) {
+      return 'watermark';
+    }
+  }
+
+  // Check SFX patterns
+  for (const pattern of SFX_PATTERNS) {
+    if (pattern.test(text.trim())) {
+      return 'sfx';
+    }
+  }
+
+  // Large centered text with few words → chapter title
+  const wordCount = text.split(/\s+/).length;
+  if (wordCount <= 5 && bbox.height > 50 && bbox.width > 200) {
+    // If this is likely a big header
+    if (bbox.y < 200) { // Near top of image
+      return 'chapter_title';
+    }
+  }
+
+  // Rectangular aspect ratio → narration box
+  const aspect = bbox.width / bbox.height;
+  if (aspect > 2.5 && wordCount > 5) {
+    return 'narration_box';
+  }
+
+  // Default: speech bubble
+  return 'speech_bubble';
+}
+
+// ── Text Cleaning ────────────────────────────────────────────────────
 
 export function cleanOCRText(text: string): string {
   if (!text) return '';
 
-  // Remove lines/patterns representing scanlation credits/watermarks
-  const watermarkPatterns = [
-    /read\s*first\s*at/gi,
-    /read\s*first\s*on/gi,
-    /mangacultivator/gi,
-    /anshscans/gi,
-    /dsc\.gg/gi,
-    /patreon\.com/gi,
-    /discord/gi,
-    /scans/gi,
-    /webtoon/gi
-  ];
-
   let cleaned = text;
-  for (const pattern of watermarkPatterns) {
-    cleaned = cleaned.replace(pattern, '');
-  }
 
   // Remove specific speed lines or visual noise characters
   const words = cleaned.split(/\s+/);
   const cleanedWords = words.map(word => {
-    // If a word is just symbols or single letters combined with symbols (like "—=" or "y=" or "I=")
-    // Strip purely non-alphanumeric words unless they are valid punctuation
-    if (/^[~\-=_|\\\/+*#^&<>§]+$/.test(word)) {
+    if (/^[~\-=_|\\/+*#^&<>§]+$/.test(word)) {
       return '';
     }
-    // Strip trailing/leading symbols from words (e.g. "=WHAT" -> "WHAT")
-    let w = word.replace(/^[~\-=_|\\\/+*#^&<>]+/g, '');
-    w = w.replace(/[~\-=_|\\\/+*#^&<>]+$/g, '');
+    let w = word.replace(/^[~\-=_|\\/+*#^&<>]+/g, '');
+    w = w.replace(/[~\-=_|\\/+*#^&<>]+$/g, '');
     return w;
   }).filter(Boolean);
 
   cleaned = cleanedWords.join(' ');
 
   // Clean repeated punctuation
-  cleaned = cleaned.replace(/[\-=_|\\\/+*#^&<>]+/g, ' ');
+  cleaned = cleaned.replace(/[\-=_|\\/+*#^&<>]+/g, ' ');
   cleaned = cleaned.replace(/\s+/g, ' ').trim();
 
-  // If the cleaned text has very few letters relative to its length (mostly garbage symbols), discard
-  const letterCount = (cleaned.match(/[a-zA-Z]/g) || []).length;
+  // If the cleaned text has very few letters relative to its length (mostly garbage), discard
+  const letterCount = (cleaned.match(/[a-zA-Z\u3040-\u309f\u30a0-\u30ff\u4e00-\u9faf\uac00-\ud7af]/g) || []).length;
   if (cleaned.length > 0 && letterCount / cleaned.length < 0.3) {
     return '';
   }
 
   return cleaned;
 }
+
+// ── Geometry Helpers ─────────────────────────────────────────────────
 
 function boxesOverlap(a: BoundingBox, b: BoundingBox): boolean {
   const xOverlap = Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x));
@@ -183,14 +269,14 @@ function boxesOverlap(a: BoundingBox, b: BoundingBox): boolean {
   const bArea = b.width * b.height;
   const minArea = Math.min(aArea, bArea);
   
-  // If overlap area is more than 30% of the smaller box, they overlap significantly
   return (overlapArea / minArea) > 0.3;
 }
+
+// ── Line/Paragraph Grouping ──────────────────────────────────────────
 
 function groupLinesIntoParagraphs(lines: OCRWord[]): OCRWord[] {
   if (lines.length === 0) return [];
 
-  // Sort lines vertically by top coordinate
   const sorted = [...lines].sort((a, b) => a.bbox.y - b.bbox.y);
   
   const paragraphs: OCRWord[][] = [];
@@ -221,10 +307,8 @@ function groupLinesIntoParagraphs(lines: OCRWord[]): OCRWord[] {
           candidate.bbox.height
         );
 
-        // Candidate top should be close to paragraph bottom
         const verticalDistance = candidate.bbox.y - (pBbox.y + pBbox.height);
         
-        // Candidate should align horizontally with paragraph center
         const pCenterX = pBbox.x + pBbox.width / 2;
         const candidateCenterX = candidate.bbox.x + candidate.bbox.width / 2;
         const horizontalDistance = Math.abs(candidateCenterX - pCenterX);
@@ -248,16 +332,14 @@ function groupLinesIntoParagraphs(lines: OCRWord[]): OCRWord[] {
     const minY = Math.min(...group.map((w) => w.bbox.y));
     const maxX = Math.max(...group.map((w) => w.bbox.x + w.bbox.width));
     const maxY = Math.max(...group.map((w) => w.bbox.y + w.bbox.height));
+    const bbox: BoundingBox = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 
     return {
       text,
       confidence: avgConfidence,
-      bbox: {
-        x: minX,
-        y: minY,
-        width: maxX - minX,
-        height: maxY - minY,
-      },
+      bbox,
+      isVertical: detectVerticalText(bbox),
+      textType: classifyTextHeuristic(text, bbox, group.length) as TextType,
     };
   });
 }
@@ -302,12 +384,7 @@ function groupWordsByProximity(words: OCRWord[]): OCRWord[] {
     return {
       text,
       confidence: avgConfidence,
-      bbox: {
-        x: minX,
-        y: minY,
-        width: maxX - minX,
-        height: maxY - minY,
-      },
+      bbox: { x: minX, y: minY, width: maxX - minX, height: maxY - minY },
     };
   });
 }
@@ -315,7 +392,6 @@ function groupWordsByProximity(words: OCRWord[]): OCRWord[] {
 export async function runOCRBatch(imageBuffers: Buffer[], langs: string[] = ['eng', 'jpn', 'kor', 'chi_sim']): Promise<OCRResult[]> {
   const results: OCRResult[] = [];
   
-  // Process sequentially to avoid memory issues
   for (const buffer of imageBuffers) {
     try {
       const result = await runOCR(buffer, langs);

@@ -16,6 +16,7 @@ export const FETCH_TIMEOUT_MS = 30_000;
 export const OCR_TIMEOUT_MS = 60_000;
 export const MAX_IMAGES_PER_CHAPTER = 100;
 export const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024; // 10MB
+export const MAX_UPLOAD_SIZE_BYTES = 50 * 1024 * 1024; // 50MB for ZIP uploads
 export const MIN_OCR_CONFIDENCE = 40;
 
 export const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -23,7 +24,21 @@ export const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 export const RATE_LIMIT_WINDOW_MS = 60_000; // 1 minute
 export const RATE_LIMIT_MAX_REQUESTS = 10;
 
-// Private IP ranges to block for SSRF
+// ── Layout Engine ────────────────────────────────────────────────────
+export const MAX_FONT_SIZE_PX = 36;
+export const MIN_FONT_SIZE_PX = 8;
+export const DEFAULT_FONT_WEIGHT = 700;
+export const VERTICAL_TEXT_RATIO_THRESHOLD = 5;
+
+/** Average character width as a fraction of font size for Arabic fonts (empirically measured for Cairo) */
+export const ARABIC_CHAR_WIDTH_RATIO = 0.55;
+/** Line height multiplier */
+export const ARABIC_LINE_HEIGHT_RATIO = 1.3;
+
+export const ARABIC_FONTS = ['Cairo', 'Tajawal', 'Noto Naskh Arabic'] as const;
+export const PRIMARY_ARABIC_FONT = 'Cairo';
+
+// ── SSRF Protection ──────────────────────────────────────────────────
 export const BLOCKED_IP_RANGES = [
   /^127\./,
   /^10\./,
@@ -53,13 +68,13 @@ export const FEATURES = [
     icon: 'languages',
   },
   {
-    title: 'Text Overlay',
-    description: 'Translated text displayed precisely over original speech bubbles',
+    title: 'Smart Inpainting',
+    description: 'Original text cleanly removed and replaced with perfectly fitted Arabic inside bubbles',
     icon: 'layers',
   },
   {
-    title: 'Instant Results',
-    description: 'Smart caching ensures previously translated chapters load instantly',
-    icon: 'zap',
+    title: 'Upload Support',
+    description: 'Upload images directly when websites block automated access — always works',
+    icon: 'upload',
   },
 ] as const;

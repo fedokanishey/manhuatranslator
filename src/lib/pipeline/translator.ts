@@ -1,4 +1,6 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars */
 import translate from 'google-translate-api-x';
+
 import { DEFAULT_TARGET_LANG } from '../constants';
 import { getApiKey, tryGeminiModels, getOpenRouterKey, tryOpenRouterModels } from './gemini';
 import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';

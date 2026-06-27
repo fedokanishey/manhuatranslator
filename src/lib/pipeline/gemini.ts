@@ -1,8 +1,13 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars */
 import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
-import type { TextOverlay, BoundingBox } from '@/types/translation';
+
+import type { TextOverlay, BoundingBox, TextType, BubbleShape } from '@/types/translation';
 import * as fs from 'fs';
 import * as path from 'path';
 import sharp from 'sharp';
+import { VERTICAL_TEXT_RATIO_THRESHOLD } from '../constants';
+
+// ── Gemini Response Types ────────────────────────────────────────────
 
 interface GeminiBubble {
   originalText: string;
@@ -13,18 +18,22 @@ interface GeminiBubble {
     ymax: number;
     xmax: number;
   };
+  textType: string;
+  isVertical: boolean;
+  bubbleShape: string;
 }
 
 interface GeminiResponse {
   bubbles: GeminiBubble[];
 }
 
+// ── API Key Helpers ──────────────────────────────────────────────────
+
 export function getApiKey(): string | undefined {
   if (process.env.GEMINI_API_KEY) {
     return process.env.GEMINI_API_KEY;
   }
   
-  // Try loading from .env.local manually to avoid dev server restart
   try {
     const dotenvPath = path.join(process.cwd(), '.env.local');
     if (fs.existsSync(dotenvPath)) {
@@ -51,18 +60,68 @@ export const GEMINI_MODELS = [
   'gemini-3.1-flash-lite'
 ];
 
+let lastActiveGeminiModelIndex = 0;
+let lastActiveOpenRouterModelIndex = 0;
+
+const CACHE_DIR = path.join(process.cwd(), '.cache');
+const STATE_FILE = path.join(CACHE_DIR, 'model_state.json');
+
+function loadModelState() {
+  try {
+    if (fs.existsSync(STATE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8'));
+      if (typeof data.geminiIndex === 'number' && data.geminiIndex >= 0 && data.geminiIndex < GEMINI_MODELS.length) {
+        lastActiveGeminiModelIndex = data.geminiIndex;
+      }
+      if (typeof data.openRouterIndex === 'number' && data.openRouterIndex >= 0 && data.openRouterIndex < OPENROUTER_MODELS.length) {
+        lastActiveOpenRouterModelIndex = data.openRouterIndex;
+      }
+      console.log(`[Gemini/OpenRouter] Restored active model indices: Gemini=${lastActiveGeminiModelIndex}, OpenRouter=${lastActiveOpenRouterModelIndex}`);
+    }
+  } catch (e) {
+    console.error('[Gemini] Failed to load model state from disk:', e);
+  }
+}
+
+function saveModelState() {
+  try {
+    if (!fs.existsSync(CACHE_DIR)) {
+      fs.mkdirSync(CACHE_DIR, { recursive: true });
+    }
+    fs.writeFileSync(STATE_FILE, JSON.stringify({
+      geminiIndex: lastActiveGeminiModelIndex,
+      openRouterIndex: lastActiveOpenRouterModelIndex
+    }, null, 2));
+  } catch (e) {
+    console.error('[Gemini] Failed to save model state to disk:', e);
+  }
+}
+
+// Initialize state
+loadModelState();
+
 export async function tryGeminiModels<T>(
   apiKey: string,
   executeFn: (model: any) => Promise<T>
 ): Promise<T> {
   const genAI = new GoogleGenerativeAI(apiKey);
   let lastError: any = null;
+  const startIndex = lastActiveGeminiModelIndex;
 
-  for (const modelName of GEMINI_MODELS) {
+  for (let i = 0; i < GEMINI_MODELS.length; i++) {
+    const idx = (startIndex + i) % GEMINI_MODELS.length;
+    const modelName = GEMINI_MODELS[idx];
     try {
-      console.log(`[Gemini] Attempting call with model: ${modelName}...`);
+      console.log(`[Gemini] Attempting call with model: ${modelName} (index: ${idx})...`);
       const model = genAI.getGenerativeModel({ model: modelName });
       const result = await executeFn(model);
+      
+      if (lastActiveGeminiModelIndex !== idx) {
+        console.log(`[Gemini] Switching last active model to: ${idx} (${modelName})`);
+        lastActiveGeminiModelIndex = idx;
+        saveModelState();
+      }
+      
       console.log(`[Gemini] Success using model: ${modelName}`);
       return result;
     } catch (err: any) {
@@ -112,10 +171,13 @@ export async function tryOpenRouterModels(
   maxTokens: number = 3000
 ): Promise<string> {
   let lastError: any = null;
+  const startIndex = lastActiveOpenRouterModelIndex;
 
-  for (const modelName of OPENROUTER_MODELS) {
+  for (let i = 0; i < OPENROUTER_MODELS.length; i++) {
+    const idx = (startIndex + i) % OPENROUTER_MODELS.length;
+    const modelName = OPENROUTER_MODELS[idx];
     try {
-      console.log(`[OpenRouter] Attempting call with model: ${modelName}...`);
+      console.log(`[OpenRouter] Attempting call with model: ${modelName} (index: ${idx})...`);
       const headers: Record<string, string> = {
         "Authorization": `Bearer ${apiKey}`,
         "Content-Type": "application/json",
@@ -150,6 +212,13 @@ export async function tryOpenRouterModels(
         throw new Error("OpenRouter returned empty response content");
       }
 
+      if (lastActiveOpenRouterModelIndex !== idx) {
+        console.log(`[OpenRouter] Switching last active model to: ${idx} (${modelName})`);
+        lastActiveOpenRouterModelIndex = idx;
+        saveModelState();
+      }
+
+
       console.log(`[OpenRouter] Success using model: ${modelName}`);
       return text;
     } catch (err: any) {
@@ -160,6 +229,43 @@ export async function tryOpenRouterModels(
 
   throw new Error(`All OpenRouter models failed. Last error: ${lastError?.message || lastError}`);
 }
+
+
+// ── Enhanced Gemini Vision Prompt ────────────────────────────────────
+
+const VISION_PROMPT = `You are an expert manga/manhwa/webtoon analyzer and translator. Analyze this page image and find every text element.
+
+For each text element detected, return:
+1. **originalText**: The exact original text.
+2. **translatedText**: Natural, fluent manga-style Arabic translation.
+3. **bbox**: Bounding box of the INNER AREA of the text region (inside bubble borders).
+   Format: ymin, xmin, ymax, xmax — normalized to 0–1000 scale.
+   - For speech bubbles: bbox covers the inside of the bubble, EXCLUDING the black outline/border.
+   - For text on artwork: tight bounding box around the text lines.
+4. **textType**: Classify each text element as one of:
+   - "speech_bubble" — dialogue inside a speech bubble
+   - "narration_box" — narrator text in a rectangular box
+   - "sfx" — sound effects (onomatopoeia like BOOM, ドドド, 쾅)
+   - "watermark" — scanlation credits, URLs, translator notes
+   - "chapter_title" — chapter number or title text
+   - "decorative" — decorative/artistic text that is part of the artwork
+5. **isVertical**: true if the text is written vertically (common in Japanese manga), false otherwise.
+6. **bubbleShape**: The shape of the containing bubble:
+   - "ellipse" — oval/circular speech bubble
+   - "rectangle" — rectangular narrator box or panel
+   - "cloud" — thought/cloud bubble with wavy edges
+   - "irregular" — any other shape or no clear bubble
+
+RULES:
+- Translate ONLY speech_bubble and narration_box types to Arabic.
+- For sfx: include originalText but set translatedText to the Arabic phonetic equivalent if possible, otherwise keep original.
+- For watermark, chapter_title, decorative: include originalText but set translatedText to empty string "".
+- bbox must stay INSIDE bubble borders — never include the outline itself.
+- ymin = top edge, ymax = bottom edge, xmin = left edge, xmax = right edge.
+- Detect ALL text elements, even those without speech bubble borders.
+- EXCLUDE: purely decorative background patterns that aren't actual text.`;
+
+// ── Main Entry Point ─────────────────────────────────────────────────
 
 export async function translateImageWithGemini(
   imageBuffer: Buffer,
@@ -180,7 +286,7 @@ export async function translateImageWithGemini(
     const overlap = 150;
     const step = sliceHeight - overlap;
 
-    console.log(`[Gemini] Image is very tall (${imageHeight}px). Slicing into standard chunks of ${sliceHeight}px vertically to prevent coordinate distortion...`);
+    console.log(`[Gemini] Image is very tall (${imageHeight}px). Slicing into chunks of ${sliceHeight}px...`);
 
     const slicePromises: Promise<TextOverlay[]>[] = [];
     let top = 0;
@@ -250,6 +356,8 @@ export async function translateImageWithGemini(
   );
 }
 
+// ── Single Image Translation ─────────────────────────────────────────
+
 async function translateSingleImageWithGemini(
   imageBuffer: Buffer,
   mimeType: string,
@@ -261,29 +369,6 @@ async function translateSingleImageWithGemini(
   try {
     const base64Image = imageBuffer.toString('base64');
 
-    const prompt = `You are a manga/manhwa translator. Analyze this page image and find every speech bubble, narrator box, and text block containing dialogue, narration, or spoken words.
-
-For each text element detected:
-1. Extract the original text exactly as written.
-2. Translate it into natural, fluent manga-style Arabic.
-3. Return the bounding box of the INNER AREA of the speech bubble or narrator box (just inside the outer outlines/borders) or a tight bounding box around the text if it is written directly on the artwork without borders.
-
-Bounding box format: ymin, xmin, ymax, xmax — normalized to a 0–1000 scale relative to image height and width.
-
-IMPORTANT — bounding box accuracy:
-- If the text is inside a speech bubble or narrator box: The bbox MUST cover the inside region of the speech bubble or narrator box where the text resides, but stay strictly INSIDE the black outlines/borders. I will use this bbox to place an opaque background rectangle to mask the original English text and render the Arabic translation centered inside it. Do NOT include the outer outlines/borders of the speech bubbles in the bbox (so we don't cover or overwrite them).
-- If the text is written directly on the background/artwork and has no outline/border: Return a tight bounding box wrapping the text lines.
-- ymin = top edge of the region, ymax = bottom edge of the region.
-- xmin = left edge of the region, xmax = right edge of the region.
-
-What to include:
-- All dialogue, narration, and thought bubbles.
-- Any other text blocks, captions, or text written directly on the background containing spoken words or conversation.
-- Even if a text block does not have a speech bubble outline or border, you MUST still detect it.
-
-What to exclude:
-- Scanlation credits, website URLs, translator notes, watermarks, and purely decorative/non-verbal SFX (like "WOOSH", "BAM", "CLANG").`;
-
     let responseText = '';
 
     // 1. Try OpenRouter first if key is present
@@ -294,26 +379,20 @@ What to exclude:
           {
             role: 'user',
             content: [
-              {
-                type: 'text',
-                text: prompt
-              },
+              { type: 'text', text: VISION_PROMPT },
               {
                 type: 'image_url',
-                image_url: {
-                  url: `data:${mimeType};base64,${base64Image}`
-                }
+                image_url: { url: `data:${mimeType};base64,${base64Image}` }
               }
             ]
           }
         ], true);
       } catch (err) {
         console.error('[Gemini/OpenRouter] OpenRouter vision translation failed:', err);
-        // Fall through to direct Gemini
       }
     }
 
-    // 2. Try direct Gemini key if present and OpenRouter failed/was not used
+    // 2. Try direct Gemini key if present and OpenRouter failed
     if (!responseText && apiKey) {
       const response = await tryGeminiModels(apiKey, async (model) => {
         let retries = 2;
@@ -325,15 +404,8 @@ What to exclude:
                 {
                   role: 'user',
                   parts: [
-                    {
-                      inlineData: {
-                        mimeType,
-                        data: base64Image,
-                      },
-                    },
-                    {
-                      text: prompt,
-                    },
+                    { inlineData: { mimeType, data: base64Image } },
+                    { text: VISION_PROMPT },
                   ],
                 },
               ],
@@ -344,24 +416,36 @@ What to exclude:
                   properties: {
                     bubbles: {
                       type: SchemaType.ARRAY,
-                      description: 'List of detected speech bubbles and text overlays',
+                      description: 'All detected text elements on the page',
                       items: {
                         type: SchemaType.OBJECT,
                         properties: {
-                          originalText: { type: SchemaType.STRING, description: 'Original text in English/Korean/Japanese' },
-                          translatedText: { type: SchemaType.STRING, description: 'Arabic translation of the text' },
+                          originalText: { type: SchemaType.STRING, description: 'Original text' },
+                          translatedText: { type: SchemaType.STRING, description: 'Arabic translation (empty for non-translatable types)' },
                           bbox: {
                             type: SchemaType.OBJECT,
                             properties: {
-                              ymin: { type: SchemaType.NUMBER, description: 'Top edge coordinate (0 to 1000)' },
-                              xmin: { type: SchemaType.NUMBER, description: 'Left edge coordinate (0 to 1000)' },
-                              ymax: { type: SchemaType.NUMBER, description: 'Bottom edge coordinate (0 to 1000)' },
-                              xmax: { type: SchemaType.NUMBER, description: 'Right edge coordinate (0 to 1000)' },
+                              ymin: { type: SchemaType.NUMBER, description: 'Top edge (0–1000)' },
+                              xmin: { type: SchemaType.NUMBER, description: 'Left edge (0–1000)' },
+                              ymax: { type: SchemaType.NUMBER, description: 'Bottom edge (0–1000)' },
+                              xmax: { type: SchemaType.NUMBER, description: 'Right edge (0–1000)' },
                             },
                             required: ['ymin', 'xmin', 'ymax', 'xmax'],
                           },
+                          textType: {
+                            type: SchemaType.STRING,
+                            description: 'Classification: speech_bubble, narration_box, sfx, watermark, chapter_title, decorative',
+                          },
+                          isVertical: {
+                            type: SchemaType.BOOLEAN,
+                            description: 'True if text is written vertically',
+                          },
+                          bubbleShape: {
+                            type: SchemaType.STRING,
+                            description: 'Shape: ellipse, rectangle, cloud, irregular',
+                          },
                         },
-                        required: ['originalText', 'translatedText', 'bbox'],
+                        required: ['originalText', 'translatedText', 'bbox', 'textType', 'isVertical', 'bubbleShape'],
                       },
                     },
                   },
@@ -395,29 +479,121 @@ What to exclude:
       throw new Error('Invalid JSON structure returned by Gemini/OpenRouter');
     }
 
-    return result.bubbles.map((b) => {
-      const x = (b.bbox.xmin / 1000) * imageWidth;
-      const y = (b.bbox.ymin / 1000) * imageHeight;
-      const width = ((b.bbox.xmax - b.bbox.xmin) / 1000) * imageWidth;
-      const height = ((b.bbox.ymax - b.bbox.ymin) / 1000) * imageHeight;
-
-      return {
-        originalText: b.originalText,
-        translatedText: b.translatedText,
-        bbox: {
-          x: Math.round(x),
-          y: Math.round(y),
-          width: Math.round(width),
-          height: Math.round(height),
-        } as BoundingBox,
-        confidence: 100,
-      };
-    });
+    return result.bubbles
+      .map((b) => mapGeminiBubbleToOverlay(b, imageWidth, imageHeight))
+      .filter(Boolean) as TextOverlay[];
   } catch (error) {
     console.error('[Gemini/OpenRouter] Vision call failed:', error);
     throw error;
   }
 }
+
+// ── Mapping ──────────────────────────────────────────────────────────
+
+function mapGeminiBubbleToOverlay(
+  b: GeminiBubble,
+  imageWidth: number,
+  imageHeight: number
+): TextOverlay | null {
+  const x = (b.bbox.xmin / 1000) * imageWidth;
+  const y = (b.bbox.ymin / 1000) * imageHeight;
+  const width = ((b.bbox.xmax - b.bbox.xmin) / 1000) * imageWidth;
+  const height = ((b.bbox.ymax - b.bbox.ymin) / 1000) * imageHeight;
+
+  // Guard against invalid bounding boxes
+  if (width <= 0 || height <= 0) return null;
+
+  // Detect vertical text via ratio heuristic as a fallback
+  const isVertical = b.isVertical || (height / width > VERTICAL_TEXT_RATIO_THRESHOLD);
+
+  // Classify text type with normalization
+  const textType = normalizeTextType(b.textType);
+
+  // Map bubble shape
+  const bubbleShape = normalizeBubbleShape(b.bubbleShape);
+
+  const bbox: BoundingBox = {
+    x: Math.round(x),
+    y: Math.round(y),
+    width: Math.round(width),
+    height: Math.round(height),
+  };
+
+  // For vertical text, enforce compact bounding box
+  const adjustedBbox = isVertical ? enforceCompactVerticalBox(bbox, imageWidth, imageHeight) : bbox;
+
+  return {
+    originalText: b.originalText,
+    translatedText: b.translatedText,
+    bbox: adjustedBbox,
+    confidence: 100,
+    textType,
+    isVertical,
+    bubblePolygon: {
+      points: bboxToPolygonPoints(adjustedBbox),
+      boundingBox: adjustedBbox,
+      shape: bubbleShape,
+    },
+  };
+}
+
+function normalizeTextType(raw: string): TextType {
+  const map: Record<string, TextType> = {
+    'speech_bubble': 'speech_bubble',
+    'speech': 'speech_bubble',
+    'dialogue': 'speech_bubble',
+    'narration_box': 'narration_box',
+    'narration': 'narration_box',
+    'narrator': 'narration_box',
+    'sfx': 'sfx',
+    'sound_effect': 'sfx',
+    'watermark': 'watermark',
+    'credit': 'watermark',
+    'chapter_title': 'chapter_title',
+    'title': 'chapter_title',
+    'decorative': 'decorative',
+  };
+  return map[raw?.toLowerCase()] || 'speech_bubble';
+}
+
+function normalizeBubbleShape(raw: string): BubbleShape {
+  const map: Record<string, BubbleShape> = {
+    'ellipse': 'ellipse',
+    'oval': 'ellipse',
+    'circle': 'ellipse',
+    'rectangle': 'rectangle',
+    'rect': 'rectangle',
+    'box': 'rectangle',
+    'cloud': 'cloud',
+    'thought': 'cloud',
+    'irregular': 'irregular',
+  };
+  return map[raw?.toLowerCase()] || 'irregular';
+}
+
+/** Prevent vertical text regions from creating giant overlays */
+function enforceCompactVerticalBox(bbox: BoundingBox, imgWidth: number, imgHeight: number): BoundingBox {
+  const maxHeight = imgHeight * 0.25; // Never exceed 25% of image height
+  const maxWidth = imgWidth * 0.08;   // Vertical text is narrow
+
+  return {
+    x: bbox.x,
+    y: bbox.y,
+    width: Math.min(bbox.width, maxWidth),
+    height: Math.min(bbox.height, maxHeight),
+  };
+}
+
+function bboxToPolygonPoints(bbox: BoundingBox): Array<{ x: number; y: number }> {
+  return [
+    { x: bbox.x, y: bbox.y },
+    { x: bbox.x + bbox.width, y: bbox.y },
+    { x: bbox.x + bbox.width, y: bbox.y + bbox.height },
+    { x: bbox.x, y: bbox.y + bbox.height },
+  ];
+}
+
+// ── Deduplication ────────────────────────────────────────────────────
 
 function deduplicateOverlays(overlays: TextOverlay[]): TextOverlay[] {
   const result: TextOverlay[] = [];
@@ -426,9 +602,10 @@ function deduplicateOverlays(overlays: TextOverlay[]): TextOverlay[] {
     let isDuplicate = false;
     for (let i = 0; i < result.length; i++) {
       const existing = result[i];
-      if (boxesOverlapPercent(item.bbox, existing.bbox) > 0.6) {
+      // Lower threshold to 0.4 since manga speech bubbles do not naturally overlap
+      if (boxesOverlapPercent(item.bbox, existing.bbox) > 0.4) {
         isDuplicate = true;
-        // Keep the one with longer translation (usually more complete/correct)
+        // Keep the one with longer translation
         if (item.translatedText.length > existing.translatedText.length) {
           result[i] = item;
         }
@@ -442,6 +619,7 @@ function deduplicateOverlays(overlays: TextOverlay[]): TextOverlay[] {
 
   return result;
 }
+
 
 function boxesOverlapPercent(a: BoundingBox, b: BoundingBox): number {
   const xOverlap = Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x));

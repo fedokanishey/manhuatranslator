@@ -1,4 +1,6 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars */
 import * as cheerio from 'cheerio';
+
 import type { ContentType } from '@/types/translation';
 
 export interface ParsedContent {
@@ -117,6 +119,24 @@ function extractMetadata($: cheerio.CheerioAPI, baseUrl: string): PageMetadata {
   };
 }
 
+function cleanImageSrc(src: string): string {
+  if (!src) return '';
+  let cleaned = src.trim();
+  
+  // Handle srcset format (e.g. "url 1x, url2 2x" or "url 800w, url2 1200w")
+  if (cleaned.includes(',') || cleaned.includes(' ')) {
+    const parts = cleaned.split(',');
+    for (const part of parts) {
+      const urlPart = part.trim().split(/\s+/)[0];
+      if (urlPart && (urlPart.startsWith('http') || urlPart.startsWith('//') || urlPart.startsWith('/'))) {
+        return urlPart;
+      }
+    }
+    cleaned = cleaned.split(/\s+/)[0];
+  }
+  return cleaned;
+}
+
 function extractImages($: cheerio.CheerioAPI, baseUrl: string, sourceUrl: string): ParsedImage[] {
   const images: ParsedImage[] = [];
   const seenSrcs = new Set<string>();
@@ -138,11 +158,20 @@ function extractImages($: cheerio.CheerioAPI, baseUrl: string, sourceUrl: string
 
   imgElements.each((index, el) => {
     const $el = $(el);
-    const src = $el.attr('data-src') || $el.attr('data-lazy-src') || $el.attr('src') || '';
+    const rawSrc = $el.attr('data-src') || 
+                   $el.attr('data-lazy-src') || 
+                   $el.attr('data-original') || 
+                   $el.attr('data-lazy') || 
+                   $el.attr('srcset') || 
+                   $el.attr('data-srcset') || 
+                   $el.attr('src') || 
+                   '';
+    const src = cleanImageSrc(rawSrc);
     
     if (!src || src.startsWith('data:image/svg') || src.includes('logo') || src.includes('icon')) {
       return;
     }
+
 
     const resolvedSrc = resolveUrl(src, baseUrl, sourceUrl);
     if (seenSrcs.has(resolvedSrc)) return;

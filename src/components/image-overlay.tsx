@@ -1,169 +1,102 @@
 'use client';
 
-import { useState, useEffect } from 'react';
 import type { TextOverlay } from '@/types/translation';
+import { TRANSLATABLE_TEXT_TYPES, OPTIONAL_TEXT_TYPES } from '@/types/translation';
+import { ARABIC_LINE_HEIGHT_RATIO } from '@/lib/constants';
 
 interface ImageOverlayProps {
   overlays: TextOverlay[];
   imageWidth: number;
   imageHeight: number;
-  imageBase64: string;
 }
 
-export function ImageOverlay({ overlays, imageWidth, imageHeight, imageBase64 }: ImageOverlayProps) {
-  const [bgColors, setBgColors] = useState<string[]>([]);
+/**
+ * Renders Arabic text overlays on top of an inpainted manga image.
+ * 
+ * Key differences from the old implementation:
+ * - Background is transparent (inpainting already removed original text)
+ * - Font size and line breaks are computed server-side by the layout engine
+ * - Elliptical bubbles use clip-path to prevent overflow
+ * - Proper RTL rendering with Arabic font
+ * - Never renders outside bubble boundaries
+ */
+export function ImageOverlay({ overlays, imageWidth, imageHeight }: ImageOverlayProps) {
+  // Filter to only show translatable overlays
+  const visibleOverlays = overlays.filter((o) => {
+    if (!o.textType) return true; // Legacy overlays without classification
+    return TRANSLATABLE_TEXT_TYPES.includes(o.textType) || OPTIONAL_TEXT_TYPES.includes(o.textType);
+  });
 
-  useEffect(() => {
-    if (overlays.length === 0 || !imageBase64) return;
-
-    const img = new Image();
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = img.naturalWidth;
-      canvas.height = img.naturalHeight;
-      const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      if (!ctx) return;
-
-      ctx.drawImage(img, 0, 0);
-
-      const colors = overlays.map((overlay) =>
-        sampleBubbleColor(ctx, overlay.bbox, img.naturalWidth, img.naturalHeight)
-      );
-
-      setBgColors(colors);
-    };
-    img.src = imageBase64;
-  }, [overlays, imageBase64, imageWidth, imageHeight]);
-
-  if (overlays.length === 0) return null;
+  if (visibleOverlays.length === 0) return null;
 
   return (
     <div className="text-overlay-container">
-      {overlays.map((overlay, idx) => {
-        // Keep a tiny 2% safety expansion to blend margins perfectly inside the bubble
-        const expandX = Math.max(2, overlay.bbox.width * 0.02);
-        const expandY = Math.max(2, overlay.bbox.height * 0.02);
-        
-        const adjX = Math.max(0, overlay.bbox.x - expandX);
-        const adjY = Math.max(0, overlay.bbox.y - expandY);
-        const adjW = overlay.bbox.width + expandX * 2;
-        const adjH = overlay.bbox.height + expandY * 2;
-
-        const left = (adjX / imageWidth) * 100;
-        const top = (adjY / imageHeight) * 100;
-        const width = (adjW / imageWidth) * 100;
-        const height = (adjH / imageHeight) * 100;
-
-        // Font size calculations based on adjusted bbox dimensions
-        const textLength = overlay.translatedText.length;
-        
-        // Dynamic aspect-ratio based border-radius & padding for speech bubbles vs narrator boxes
-        const aspectRatio = adjW / adjH;
-        let borderRadius = '40%';
-        let padding = '4px 8px';
-        if (aspectRatio >= 0.5 && aspectRatio <= 2.0) {
-          borderRadius = '50%'; // Oval/ellipse shape for standard speech bubbles
-          padding = '8% 12%'; // Higher padding to keep text inside the oval area
-        } else {
-          borderRadius = '8px'; // Narrator box / rectangular shape
-          padding = '4px 8px';
+      {visibleOverlays.map((overlay, idx) => {
+        if (!overlay.translatedText || overlay.translatedText.trim().length === 0) {
+          return null;
         }
 
-        // Estimate lines and character width to set optimal font size
-        const estimatedLines = Math.max(1, Math.ceil(textLength / 12));
-        const heightBasedFontSize = (overlay.bbox.height / estimatedLines) * 0.85;
-        const avgCharsPerLine = Math.max(4, textLength / estimatedLines);
-        const widthBasedFontSize = (overlay.bbox.width / avgCharsPerLine) * 1.6;
-        
-        let fontSizePx = Math.min(heightBasedFontSize, widthBasedFontSize);
-        fontSizePx = Math.max(10, Math.min(fontSizePx, 22));
-        const fontSizeCqw = (fontSizePx / imageWidth) * 100;
+        const layout = overlay.layoutResult;
+        const shape = overlay.bubblePolygon?.shape || 'rectangle';
 
-        const bgColor = bgColors[idx] || 'rgb(255, 255, 255)';
+        // Position as percentage of image dimensions
+        const left = (overlay.bbox.x / imageWidth) * 100;
+        const top = (overlay.bbox.y / imageHeight) * 100;
+        const width = (overlay.bbox.width / imageWidth) * 100;
+        const height = (overlay.bbox.height / imageHeight) * 100;
+
+        // Font size: convert from absolute pixels to container-query-relative units
+        const fontSize = layout?.fontSize || 14;
+        const fontSizeCqw = (fontSize / imageWidth) * 100;
+
+        // Line height
+        const lineHeight = ARABIC_LINE_HEIGHT_RATIO;
+
+        // Clip path for elliptical bubbles (prevents text overflow)
+        const clipPath = shape === 'ellipse'
+          ? 'ellipse(50% 50% at 50% 50%)'
+          : shape === 'cloud'
+            ? 'ellipse(48% 48% at 50% 50%)'
+            : undefined;
+
+        // Determine overlay CSS class
+        const shapeClass = shape === 'ellipse'
+          ? 'text-overlay-ellipse'
+          : shape === 'cloud'
+            ? 'text-overlay-cloud'
+            : shape === 'rectangle'
+              ? 'text-overlay-narration'
+              : 'text-overlay-irregular';
 
         return (
           <div
             key={`overlay-${idx}`}
-            className="text-overlay-box"
+            className={`text-overlay-box ${shapeClass}`}
             style={{
               left: `${left}%`,
               top: `${top}%`,
               width: `${width}%`,
               height: `${height}%`,
-              fontSize: `clamp(11px, ${fontSizeCqw}cqw, 24px)`,
-              backgroundColor: bgColor,
-              borderRadius: borderRadius,
-              padding: padding,
+              fontSize: `clamp(${Math.max(8, fontSize * 0.6)}px, ${fontSizeCqw}cqw, ${Math.min(36, fontSize * 1.3)}px)`,
+              lineHeight: lineHeight,
+              clipPath,
             }}
             title={`Original: ${overlay.originalText}`}
           >
-            {overlay.translatedText}
+            <div className="text-overlay-inner">
+              {layout?.lines ? (
+                layout.lines.map((line, lineIdx) => (
+                  <span key={lineIdx} className="text-overlay-line">
+                    {line}
+                  </span>
+                ))
+              ) : (
+                <span className="text-overlay-line">{overlay.translatedText}</span>
+              )}
+            </div>
           </div>
         );
       })}
     </div>
   );
-}
-
-/**
- * Samples the bubble background color by reading a dense grid of pixels
- * inside the bbox, filtering out dark pixels (text/outlines),
- * and finding the most common color.
- */
-function sampleBubbleColor(
-  ctx: CanvasRenderingContext2D,
-  bbox: { x: number; y: number; width: number; height: number },
-  imgWidth: number,
-  imgHeight: number
-): string {
-  const samples: [number, number, number][] = [];
-  const steps = 5;
-
-  for (let row = 0; row < steps; row++) {
-    for (let col = 0; col < steps; col++) {
-      const px = bbox.x + bbox.width * ((col + 0.5) / steps);
-      const py = bbox.y + bbox.height * ((row + 0.5) / steps);
-
-      const x = Math.max(0, Math.min(Math.round(px), imgWidth - 1));
-      const y = Math.max(0, Math.min(Math.round(py), imgHeight - 1));
-      const pixel = ctx.getImageData(x, y, 1, 1).data;
-      samples.push([pixel[0], pixel[1], pixel[2]]);
-    }
-  }
-
-  // Filter out dark pixels (text, outlines)
-  const lightSamples = samples.filter(([r, g, b]) => {
-    const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
-    return luminance > 120;
-  });
-
-  const finalSamples = lightSamples.length >= 3 ? lightSamples : samples;
-
-  // Find most common color (8-step quantized buckets)
-  const buckets = new Map<string, { count: number; r: number; g: number; b: number }>();
-  for (const [r, g, b] of finalSamples) {
-    const key = `${Math.round(r / 8) * 8},${Math.round(g / 8) * 8},${Math.round(b / 8) * 8}`;
-    const existing = buckets.get(key);
-    if (existing) {
-      existing.count++;
-      existing.r += r;
-      existing.g += g;
-      existing.b += b;
-    } else {
-      buckets.set(key, { count: 1, r, g, b });
-    }
-  }
-
-  let best = { count: 0, r: 255, g: 255, b: 255 };
-  for (const bucket of buckets.values()) {
-    if (bucket.count > best.count) {
-      best = bucket;
-    }
-  }
-
-  if (best.count > 0) {
-    return `rgb(${Math.round(best.r / best.count)}, ${Math.round(best.g / best.count)}, ${Math.round(best.b / best.count)})`;
-  }
-
-  return 'rgb(255, 255, 255)';
 }
